@@ -33,11 +33,11 @@ internal static class RankVisuals
 
     public static RankBand GetBand(int rating) => rating switch
     {
-        < 1200 => new(RankTier.Bronze, "Bronze", 0, 1200, "Silver", Rgb(0xCD7F32), 0),
-        < 1400 => new(RankTier.Silver, "Silver", 1200, 1400, "Gold", Rgb(0xC8D0DB), 1),
-        < 1600 => new(RankTier.Gold, "Gold", 1400, 1600, "Platinum", Rgb(0xF5C451), 2),
-        < 1800 => new(RankTier.Platinum, "Platinum", 1600, 1800, "Diamond", Rgb(0x70D6C7), 3),
-        < 2000 => new(RankTier.Diamond, "Diamond", 1800, 2000, "Crystal", Rgb(0x65B8FF), 4),
+        < 1600 => new(RankTier.Bronze, "Bronze", 1500, 1600, "Silver", Rgb(0xCD7F32), 0),
+        < 1700 => new(RankTier.Silver, "Silver", 1600, 1700, "Gold", Rgb(0xC8D0DB), 1),
+        < 1800 => new(RankTier.Gold, "Gold", 1700, 1800, "Platinum", Rgb(0xF5C451), 2),
+        < 1900 => new(RankTier.Platinum, "Platinum", 1800, 1900, "Diamond", Rgb(0x70D6C7), 3),
+        < 2000 => new(RankTier.Diamond, "Diamond", 1900, 2000, "Crystal", Rgb(0x65B8FF), 4),
         _ => new(RankTier.Crystal, "Crystal", 2000, RatingEngine.MaximumRating, "Cap", Rgb(0xD184FF), 5),
     };
 
@@ -104,7 +104,7 @@ internal static class RankVisuals
 
         var progressLabel = band.Tier == RankTier.Crystal
             ? $"{rating.Rating:N0} / {RatingEngine.MaximumRating:N0}"
-            : $"{rating.Rating - band.MinimumRating:N0} / {band.NextRating - band.MinimumRating:N0} to {band.NextName}";
+            : $"{Math.Max(0, rating.Rating - band.MinimumRating):N0} / {band.NextRating - band.MinimumRating:N0} to {band.NextName}";
         draw.AddText(new Vector2(contentX, origin.Y + 88f * scale), Pack(MutedText), progressLabel);
 
         var provisional = rating.Matches < RatingEngine.ProvisionalMatches

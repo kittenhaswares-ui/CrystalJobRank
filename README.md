@@ -15,9 +15,10 @@ official competitive ladder. It is a transparent, outcome-only estimate:
 - the first 10 matches use a larger provisional adjustment;
 - damage, kills, and healing are displayed but never influence rating.
 
-The rating screen uses job-colored progress bars and six visual tiers:
-Bronze below 1200, Silver at 1200, Gold at 1400, Platinum at 1600,
-Diamond at 1800, and Crystal at 2000. The colors follow the familiar
+The rating screen uses job-colored progress bars and six visual tiers. The
+initial 1500 rating starts at Bronze, followed by Silver at 1600, Gold at
+1700, Platinum at 1800, Diamond at 1900, and Crystal at 2000. Ratings below
+1500 remain Bronze. The colors follow the familiar
 community/FFLogs job palette; Square Enix does not publish an official set of
 job-color hex values.
 
