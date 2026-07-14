@@ -11,8 +11,10 @@ The rating is not Square Enix's hidden matchmaking rating and it is not an
 official competitive ladder. It is a transparent, outcome-only estimate:
 
 - every job starts at 1500;
-- wins add rating and losses remove rating;
-- the first 10 matches use a larger provisional adjustment;
+- only Ranked wins add rating and Ranked losses remove rating;
+- Casual and Custom matches are recorded but never rated;
+- the first 10 matches use a larger provisional adjustment (`K = 64`),
+  followed by a steadier established adjustment (`K = 32`);
 - damage, kills, and healing are displayed but never influence rating.
 
 The rating screen uses job-colored progress bars and six visual tiers. The
@@ -21,6 +23,12 @@ initial 1500 rating starts at Bronze, followed by Silver at 1600, Gold at
 1500 remain Bronze. The colors follow the familiar
 community/FFLogs job palette; Square Enix does not publish an official set of
 job-color hex values.
+
+The rating is a fixed-reference logistic estimate because FFXIV does not expose
+opponent MMR. At equilibrium, the visible thresholds correspond to roughly
+50.0%, 52.9%, 55.7%, 58.6%, 61.3%, and 64.0% estimated win probability against
+the reference pool. This keeps the ladder attainable without pretending to
+know the strength of a particular lobby.
 
 This repository also contains an optional leaderboard API. A shared leaderboard
 cannot work from a static GitHub repository alone: it needs a common service
@@ -79,6 +87,20 @@ https://raw.githubusercontent.com/kittenhaswares-ui/CrystalJobRank/main/repo.jso
 
 Save the settings, open `/xlplugins`, search for **Crystal Job Rank**, and
 install it. Use `/cjr` to open the plugin window and its leaderboard settings.
+
+Local rating commands:
+
+```text
+/cjr reset SGE
+/cjr reset DRK
+/cjr reset all
+```
+
+Job abbreviations are case-insensitive and use the official three-letter job
+codes. A reset starts a new local rating epoch at 1500 Bronze while preserving
+the complete match history. It intentionally does not erase the shared
+community leaderboard, where freely deleting losses would undermine the
+ladder.
 
 ## Distribution caveat
 

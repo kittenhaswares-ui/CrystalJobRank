@@ -22,6 +22,7 @@ internal sealed class MatchStore
         this.log = log;
         filePath = Path.Combine(configDirectory, "matches.json");
         data = Load();
+        if (PluginDataMigrations.Apply(data)) SaveLocked();
     }
 
     public IReadOnlyList<MatchRecord> Snapshot()
@@ -36,15 +37,58 @@ internal sealed class MatchStore
     {
         lock (gate)
         {
+            var events = data.Matches
+                .OrderBy(x => x.CompletedAtUtc)
+                .ThenBy(x => x.Id)
+                .Select(ToRatingEvent)
+                .ToArray();
             return data.Matches
-                .Where(x => x.LocalJob != CombatJob.Unknown && x.Queue != MatchQueue.Custom)
-                .GroupBy(x => x.LocalJob)
-                .Select(group => RatingEngine.Replay(
-                    group.Key,
-                    group.OrderBy(x => x.CompletedAtUtc).Select(x => x.Outcome)))
+                .Where(x => x.LocalJob != CombatJob.Unknown && RatingEngine.IsRatedQueue(x.Queue))
+                .Select(x => x.LocalJob)
+                .Distinct()
+                .Select(job => RatingEngine.ReplayEpoch(job, CurrentEpochLocked(job), events))
                 .OrderByDescending(x => x.Rating)
                 .ThenByDescending(x => x.Matches)
                 .ToArray();
+        }
+    }
+
+    public bool ResetRating(CombatJob job)
+    {
+        lock (gate)
+        {
+            var previousEpochs = new Dictionary<CombatJob, int>(data.CurrentRatingEpochs);
+            if (!RatingEpochs.TryReset(data.CurrentRatingEpochs, data.Matches.Select(ToRatingEvent), job)) return false;
+            try
+            {
+                SaveLocked();
+            }
+            catch
+            {
+                data.CurrentRatingEpochs = previousEpochs;
+                throw;
+            }
+            return true;
+        }
+    }
+
+    public IReadOnlyList<CombatJob> ResetAllRatings()
+    {
+        lock (gate)
+        {
+            var previousEpochs = new Dictionary<CombatJob, int>(data.CurrentRatingEpochs);
+            var jobs = RatingEpochs.ResetAll(data.CurrentRatingEpochs, data.Matches.Select(ToRatingEvent));
+            if (jobs.Count == 0) return jobs;
+            try
+            {
+                SaveLocked();
+            }
+            catch
+            {
+                data.CurrentRatingEpochs = previousEpochs;
+                throw;
+            }
+            return jobs;
         }
     }
 
@@ -65,13 +109,9 @@ internal sealed class MatchStore
                 return null;
             }
 
-            var state = RatingEngine.Replay(
-                record.LocalJob,
-                data.Matches
-                    .Where(x => x.LocalJob == record.LocalJob && x.Queue != MatchQueue.Custom)
-                    .OrderBy(x => x.CompletedAtUtc)
-                    .Select(x => x.Outcome));
-            var change = record.Queue == MatchQueue.Custom
+            record.RatingEpoch = CurrentEpochLocked(record.LocalJob);
+            var state = RatingForCurrentEpochLocked(record.LocalJob);
+            var change = !RatingEngine.IsRatedQueue(record.Queue)
                 ? new RatingChange(state.Rating, state.Rating, 0, state.Matches, state.Wins, state.Losses)
                 : RatingEngine.Apply(state, record.Outcome);
             record.RatingBefore = change.Before;
@@ -79,7 +119,15 @@ internal sealed class MatchStore
             record.RatingDelta = change.Delta;
 
             data.Matches.Add(record);
-            SaveLocked();
+            try
+            {
+                SaveLocked();
+            }
+            catch
+            {
+                data.Matches.Remove(record);
+                throw;
+            }
             return record;
         }
     }
@@ -93,10 +141,27 @@ internal sealed class MatchStore
         }
         catch (Exception exception)
         {
-            log.Error(exception, "Unable to read local match history. Starting with an empty in-memory store.");
-            return new PluginData();
+            throw new InvalidOperationException(
+                $"Match history at '{filePath}' could not be read. Refusing to overwrite it.",
+                exception);
         }
     }
+
+    private int CurrentEpochLocked(CombatJob job) => RatingEpochs.Current(data.CurrentRatingEpochs, job);
+
+    private RatingState RatingForCurrentEpochLocked(CombatJob job) => RatingEngine.ReplayEpoch(
+        job,
+        CurrentEpochLocked(job),
+        data.Matches
+            .OrderBy(x => x.CompletedAtUtc)
+            .ThenBy(x => x.Id)
+            .Select(ToRatingEvent));
+
+    private static RatingEvent ToRatingEvent(MatchRecord match) => new(
+        match.LocalJob,
+        match.Outcome,
+        match.Queue,
+        match.RatingEpoch);
 
     private void SaveLocked()
     {

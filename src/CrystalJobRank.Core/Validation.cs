@@ -20,9 +20,19 @@ public static partial class Validation
 
     public static void ValidateSubmission(MatchSubmission submission)
     {
-        if (submission.Job == CombatJob.Unknown)
+        if (!CombatJobs.All.Contains(submission.Job))
         {
             throw new ArgumentException("Job is required.");
+        }
+
+        if (!Enum.IsDefined(submission.Outcome))
+        {
+            throw new ArgumentException("A valid match outcome is required.");
+        }
+
+        if (!Enum.IsDefined(submission.Queue))
+        {
+            throw new ArgumentException("A valid match queue is required.");
         }
 
         if (string.IsNullOrWhiteSpace(submission.Fingerprint) || submission.Fingerprint.Length > 128)

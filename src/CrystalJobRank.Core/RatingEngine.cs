@@ -6,11 +6,13 @@ namespace CrystalJobRank.Core;
 /// </summary>
 public static class RatingEngine
 {
+    public const int RulesVersion = 2;
     public const int InitialRating = 1500;
     public const int BaselineRating = 1500;
+    public const int RatingScale = 2000;
     public const int ProvisionalMatches = 10;
-    public const int ProvisionalK = 72;
-    public const int EstablishedK = 48;
+    public const int ProvisionalK = 64;
+    public const int EstablishedK = 32;
     public const int MinimumRating = 0;
     public const int MaximumRating = 3000;
 
@@ -18,12 +20,17 @@ public static class RatingEngine
 
     public static RatingChange Apply(RatingState state, MatchOutcome outcome)
     {
-        if (state.Job == CombatJob.Unknown)
+        if (!CombatJobs.All.Contains(state.Job))
         {
-            throw new ArgumentException("A rating cannot be calculated for an unknown job.", nameof(state));
+            throw new ArgumentException("A rating cannot be calculated for an invalid job.", nameof(state));
         }
 
-        var expected = 1d / (1d + Math.Pow(10d, (BaselineRating - state.Rating) / 400d));
+        if (!Enum.IsDefined(outcome))
+        {
+            throw new ArgumentOutOfRangeException(nameof(outcome), outcome, "A valid match outcome is required.");
+        }
+
+        var expected = EstimatedWinProbability(state.Rating);
         var actual = outcome == MatchOutcome.Win ? 1d : 0d;
         var k = state.Matches < ProvisionalMatches ? ProvisionalK : EstablishedK;
         var delta = (int)Math.Round(k * (actual - expected), MidpointRounding.AwayFromZero);
@@ -57,5 +64,18 @@ public static class RatingEngine
 
         return state;
     }
-}
 
+    public static RatingState ReplayEpoch(
+        CombatJob job,
+        int epoch,
+        IEnumerable<RatingEvent> events) => Replay(
+            job,
+            events
+                .Where(x => x.Job == job && x.Epoch == epoch && IsRatedQueue(x.Queue))
+                .Select(x => x.Outcome));
+
+    public static double EstimatedWinProbability(int rating) =>
+        1d / (1d + Math.Pow(10d, (BaselineRating - rating) / (double)RatingScale));
+
+    public static bool IsRatedQueue(MatchQueue queue) => queue == MatchQueue.Ranked;
+}

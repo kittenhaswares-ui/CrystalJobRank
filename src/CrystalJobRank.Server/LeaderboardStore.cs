@@ -23,6 +23,12 @@ public sealed class LeaderboardStore
         filePath = configuration["Leaderboard:DataPath"]
             ?? Path.Combine(environment.ContentRootPath, "server-data.json");
         data = Load();
+        if (data.Version < 2 || data.RatingRulesVersion != RatingEngine.RulesVersion)
+        {
+            data.Version = 2;
+            data.RatingRulesVersion = RatingEngine.RulesVersion;
+            SaveLocked();
+        }
     }
 
     public RegistrationResponse Register(string requestedDisplayName)
@@ -54,9 +60,9 @@ public sealed class LeaderboardStore
     public RatingState Submit(string apiKey, MatchSubmission submission)
     {
         Validation.ValidateSubmission(submission);
-        if (submission.Queue == MatchQueue.Custom)
+        if (!RatingEngine.IsRatedQueue(submission.Queue))
         {
-            throw new ArgumentException("Custom matches cannot affect the community leaderboard.");
+            throw new ArgumentException("Only Ranked matches can affect the community leaderboard.");
         }
 
         lock (gate)
@@ -67,14 +73,23 @@ public sealed class LeaderboardStore
                 throw new DuplicateMatchException("This match was already submitted.");
             }
 
-            data.Matches.Add(new StoredMatch
+            var stored = new StoredMatch
             {
                 Id = Guid.NewGuid(),
                 PlayerId = player.Id,
                 ReceivedAtUtc = DateTime.UtcNow,
                 Submission = submission,
-            });
-            SaveLocked();
+            };
+            data.Matches.Add(stored);
+            try
+            {
+                SaveLocked();
+            }
+            catch
+            {
+                data.Matches.Remove(stored);
+                throw;
+            }
             return RatingForLocked(player.Id, submission.Job);
         }
     }
@@ -122,6 +137,7 @@ public sealed class LeaderboardStore
         job,
         data.Matches
             .Where(x => x.PlayerId == playerId && x.Submission.Job == job)
+            .Where(x => RatingEngine.IsRatedQueue(x.Submission.Queue))
             .OrderBy(x => x.Submission.CompletedAtUtc)
             .ThenBy(x => x.Submission.Fingerprint, StringComparer.Ordinal)
             .Select(x => x.Submission.Outcome));
@@ -145,7 +161,13 @@ public sealed class LeaderboardStore
         if (!File.Exists(filePath)) return new ServerData();
         try
         {
-            return JsonSerializer.Deserialize<ServerData>(File.ReadAllText(filePath), JsonOptions) ?? new ServerData();
+            var loaded = JsonSerializer.Deserialize<ServerData>(File.ReadAllText(filePath), JsonOptions) ?? new ServerData();
+            if (loaded.Version > 2)
+            {
+                throw new InvalidOperationException(
+                    $"Leaderboard schema {loaded.Version} is newer than supported schema 2.");
+            }
+            return loaded;
         }
         catch (Exception exception)
         {
@@ -172,7 +194,8 @@ public sealed class DuplicateMatchException(string message) : Exception(message)
 
 public sealed class ServerData
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
+    public int RatingRulesVersion { get; set; } = RatingEngine.RulesVersion;
     public List<PlayerAccount> Players { get; set; } = [];
     public List<StoredMatch> Matches { get; set; } = [];
 }
@@ -192,4 +215,3 @@ public sealed class StoredMatch
     public DateTime ReceivedAtUtc { get; set; }
     public MatchSubmission Submission { get; set; } = null!;
 }
-

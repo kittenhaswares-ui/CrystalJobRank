@@ -15,7 +15,8 @@ reduce operations work, but they are still a backend service in this design.
 1. FFXIV produces its normal Crystalline Conflict result payload.
 2. The plugin copies that post-match payload after the match has ended.
 3. The full scoreboard is stored locally in `matches.json`.
-4. The rating engine replays only wins/losses, independently for each job.
+4. The rating engine replays only Ranked wins/losses, independently for each
+   job and local rating epoch.
 5. If the user explicitly opts in, the plugin submits only the local player's
    match fields to the configured HTTPS API.
 6. The server validates the event and recomputes rating itself.
@@ -25,24 +26,48 @@ or scoreboard rows.
 
 ## Rating model
 
-This is an Elo-like estimate against a fixed 1500 baseline:
+This is an Elo-like estimate against a fixed 1500 reference pool:
 
-`expected = 1 / (1 + 10 ^ ((1500 - rating) / 400))`
+`expected = 1 / (1 + 10 ^ ((1500 - rating) / 2000))`
 
 `delta = round(K * (result - expected))`
 
 - result is `1` for a win and `0` for a loss;
-- `K = 72` for the first 10 provisional matches;
-- `K = 48` afterwards;
+- `K = 64` for the first 10 provisional matches;
+- `K = 32` afterwards;
 - rating is clamped to `0..3000`;
 - every job starts at 1500 and has independent history;
-- custom matches are recorded locally but never affect rating or get uploaded;
+- only Ranked matches affect rating or get uploaded;
+- Casual and Custom matches remain available as local statistics;
 - damage, K/D/A, healing, and crystal time never affect rating.
 
 The fixed baseline is deliberate. FFXIV does not expose the community rating of
 all opponents, and collecting persistent identities for non-users would create
 an unacceptable privacy tradeoff. The number therefore estimates sustained win
 rate, not the hidden matchmaking strength of a specific lobby.
+
+The wider logistic scale is calibrated to the visible 100-point divisions:
+
+| Tier | Rating | Estimated win probability vs reference |
+| --- | ---: | ---: |
+| Bronze | 1500 | 50.0% |
+| Silver | 1600 | 52.9% |
+| Gold | 1700 | 55.7% |
+| Platinum | 1800 | 58.6% |
+| Diamond | 1900 | 61.3% |
+| Crystal | 2000 | 64.0% |
+
+## Local rating resets
+
+The plugin stores an integer rating epoch for every played job. Resetting a job
+increments only that job's epoch, so subsequent Ranked results replay from
+1500 while old matches and scoreboards remain visible. Epochs avoid clock and
+late-arrival problems that a timestamp cutoff would introduce.
+
+Local resets never remove community leaderboard results. Allowing users to
+delete only their losing public history would make the shared ladder
+meaningless; public resets should happen only through an administrator-defined
+season transition.
 
 ## Authentication and abuse
 
@@ -85,4 +110,3 @@ The result hook and memory offsets are version-sensitive. They compile against
 Dalamud API 15 and were cross-checked for Patch 7.5, but must be tested in game
 after every FFXIV patch. Invalid result values, durations, jobs, and scoreboard
 ranges are rejected instead of being persisted.
-

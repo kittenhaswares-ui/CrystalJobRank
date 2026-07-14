@@ -17,6 +17,7 @@ public sealed class MatchRecord
     public int RatingBefore { get; set; }
     public int RatingAfter { get; set; }
     public int RatingDelta { get; set; }
+    public int RatingEpoch { get; set; }
     public ScoreboardStats LocalStats { get; set; } = new(0, 0, 0, 0, 0, 0, 0);
     public List<PlayerScoreboardRow> Scoreboard { get; set; } = [];
 
@@ -42,7 +43,8 @@ public sealed class PlayerScoreboardRow
 
 public sealed class PluginData
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
+    public int RatingRulesVersion { get; set; } = RatingEngine.RulesVersion;
     public List<MatchRecord> Matches { get; set; } = [];
+    public Dictionary<CombatJob, int> CurrentRatingEpochs { get; set; } = [];
 }
-

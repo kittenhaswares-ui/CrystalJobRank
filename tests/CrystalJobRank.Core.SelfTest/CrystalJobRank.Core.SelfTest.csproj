@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\CrystalJobRank.Core\CrystalJobRank.Core.csproj" />
+    <Compile Include="..\..\src\CrystalJobRank.Plugin\Models\MatchRecord.cs" Link="PluginModels\MatchRecord.cs" />
+    <Compile Include="..\..\src\CrystalJobRank.Plugin\Models\PluginDataMigrations.cs" Link="PluginModels\PluginDataMigrations.cs" />
   </ItemGroup>
 </Project>
-

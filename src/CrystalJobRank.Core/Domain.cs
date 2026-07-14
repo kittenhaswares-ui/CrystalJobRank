@@ -67,6 +67,12 @@ public sealed record RatingChange(
     int WinsAfter,
     int LossesAfter);
 
+public sealed record RatingEvent(
+    CombatJob Job,
+    MatchOutcome Outcome,
+    MatchQueue Queue,
+    int Epoch);
+
 public sealed record MatchSubmission(
     string Fingerprint,
     DateTime CompletedAtUtc,
@@ -90,4 +96,3 @@ public sealed record LeaderboardRow(
     int Wins,
     int Losses,
     double WinRate);
-

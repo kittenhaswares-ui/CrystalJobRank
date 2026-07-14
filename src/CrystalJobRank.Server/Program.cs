@@ -77,7 +77,7 @@ app.MapPost("/v1/matches", (HttpRequest request, MatchSubmission submission, Lea
 
 app.MapGet("/v1/leaderboard", (string job, int? limit, LeaderboardStore store) =>
 {
-    if (!Enum.TryParse<CombatJob>(job, true, out var parsedJob) || parsedJob == CombatJob.Unknown)
+    if (!Enum.TryParse<CombatJob>(job, true, out var parsedJob) || !CombatJobs.All.Contains(parsedJob))
     {
         return Results.BadRequest(new { error = "A valid combat job is required." });
     }

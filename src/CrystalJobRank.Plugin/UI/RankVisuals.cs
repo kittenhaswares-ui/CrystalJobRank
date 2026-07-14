@@ -116,7 +116,11 @@ internal static class RankVisuals
         ImGui.Dummy(new Vector2(width, height));
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip($"{rating.Job} {band.Name}\n{rating.Rating:N0} rating\n{rating.Matches} matches • {rating.WinRate:P1} win rate");
+            ImGui.SetTooltip(
+                $"{rating.Job} {band.Name}\n" +
+                $"{rating.Rating:N0} rating\n" +
+                $"{rating.Matches} Ranked matches • {rating.WinRate:P1} observed win rate\n" +
+                $"{RatingEngine.EstimatedWinProbability(rating.Rating):P1} estimated win probability vs reference");
         }
     }
 

@@ -34,7 +34,7 @@ internal sealed class LeaderboardClient : IDisposable
         MatchRecord match,
         CancellationToken cancellationToken = default)
     {
-        if (match.Queue == MatchQueue.Custom) return;
+        if (!RatingEngine.IsRatedQueue(match.Queue)) return;
 
         var request = new HttpRequestMessage(HttpMethod.Post, BuildUri(baseUrl, "v1/matches"))
         {
