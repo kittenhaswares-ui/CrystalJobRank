@@ -61,6 +61,18 @@ Build `src/CrystalJobRank.Plugin`, add the resulting
 `/cjr`. The plugin records only the post-match results payload; it does not
 render live combat information or automate gameplay.
 
+## Install from the custom repository
+
+Add this URL under Dalamud Settings > Experimental > Custom Plugin
+Repositories:
+
+```text
+https://raw.githubusercontent.com/kittenhaswares-ui/CrystalJobRank/main/repo.json
+```
+
+Save the settings, open `/xlplugins`, search for **Crystal Job Rank**, and
+install it. Use `/cjr` to open the plugin window and its leaderboard settings.
+
 ## Distribution caveat
 
 Dalamud's official repository currently rejects PvP plugins that could create a

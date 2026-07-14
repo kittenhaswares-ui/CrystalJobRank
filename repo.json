@@ -1,0 +1,24 @@
+[
+  {
+    "Author": "Crystal Job Rank contributors",
+    "Name": "Crystal Job Rank",
+    "Punchline": "Post-match CC stats and a separate rating for every job.",
+    "Description": "Records Crystalline Conflict result screens, keeps local match history and calculates a transparent win/loss-only rating for each job. Use /cjr.",
+    "InternalName": "CrystalJobRank.Plugin",
+    "AssemblyVersion": "0.1.0.0",
+    "RepoUrl": "https://github.com/kittenhaswares-ui/CrystalJobRank",
+    "ApplicableVersion": "any",
+    "DalamudApiLevel": 15,
+    "Tags": [
+      "pvp",
+      "statistics",
+      "crystalline-conflict"
+    ],
+    "IsHide": false,
+    "IsTestingExclusive": false,
+    "DownloadLinkInstall": "https://github.com/kittenhaswares-ui/CrystalJobRank/releases/download/v0.1.0/latest.zip",
+    "DownloadLinkUpdate": "https://github.com/kittenhaswares-ui/CrystalJobRank/releases/download/v0.1.0/latest.zip",
+    "DownloadLinkTesting": "https://github.com/kittenhaswares-ui/CrystalJobRank/releases/download/v0.1.0/latest.zip",
+    "LastUpdate": "1784045590"
+  }
+]
