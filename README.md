@@ -11,8 +11,8 @@ The rating is not Square Enix's hidden matchmaking rating and it is not an
 official competitive ladder. It is a transparent, outcome-only estimate:
 
 - every job starts at 1500;
-- only Ranked wins add rating and Ranked losses remove rating;
-- Casual and Custom matches are recorded but never rated;
+- Casual and Ranked wins add rating, while Casual and Ranked losses remove it;
+- Custom and Unknown-queue matches are recorded but never rated or uploaded;
 - the first 10 matches use a larger provisional adjustment (`K = 64`),
   followed by a steadier established adjustment (`K = 32`);
 - damage, kills, and healing are displayed but never influence rating.

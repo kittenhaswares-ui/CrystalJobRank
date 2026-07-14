@@ -6,7 +6,7 @@ namespace CrystalJobRank.Core;
 /// </summary>
 public static class RatingEngine
 {
-    public const int RulesVersion = 2;
+    public const int RulesVersion = 3;
     public const int InitialRating = 1500;
     public const int BaselineRating = 1500;
     public const int RatingScale = 2000;
@@ -77,5 +77,6 @@ public static class RatingEngine
     public static double EstimatedWinProbability(int rating) =>
         1d / (1d + Math.Pow(10d, (BaselineRating - rating) / (double)RatingScale));
 
-    public static bool IsRatedQueue(MatchQueue queue) => queue == MatchQueue.Ranked;
+    public static bool IsRatedQueue(MatchQueue queue) =>
+        queue is MatchQueue.Casual or MatchQueue.Ranked;
 }

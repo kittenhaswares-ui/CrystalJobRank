@@ -43,7 +43,7 @@ internal sealed class MatchStore
                 .Select(ToRatingEvent)
                 .ToArray();
             return data.Matches
-                .Where(x => x.LocalJob != CombatJob.Unknown && RatingEngine.IsRatedQueue(x.Queue))
+                .Where(x => CombatJobs.All.Contains(x.LocalJob) && RatingEngine.IsRatedQueue(x.Queue))
                 .Select(x => x.LocalJob)
                 .Distinct()
                 .Select(job => RatingEngine.ReplayEpoch(job, CurrentEpochLocked(job), events))

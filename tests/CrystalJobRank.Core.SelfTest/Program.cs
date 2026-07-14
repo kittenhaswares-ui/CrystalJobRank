@@ -10,7 +10,7 @@ var tests = new (string Name, Action Run)[]
     ("scoreboard performance never changes rating", PerformanceDoesNotAffectRating),
     ("rating rules are calibrated to the visible tiers", TierCalibration),
     ("provisional K changes after match ten", ProvisionalBoundary),
-    ("only ranked queue affects rating", RankedQueueOnly),
+    ("casual and ranked queues affect rating", MatchmadeQueuesAreRated),
     ("rating epochs ignore prior outcomes", EpochReset),
     ("job reset epochs are isolated and repeat-safe", ResetEpochManagement),
     ("v1 history migrates and reset survives JSON reload", PluginDataMigrationAndResetRoundTrip),
@@ -92,10 +92,10 @@ static void ProvisionalBoundary()
     Equal(16, eleventh.Delta);
 }
 
-static void RankedQueueOnly()
+static void MatchmadeQueuesAreRated()
 {
     True(RatingEngine.IsRatedQueue(MatchQueue.Ranked));
-    True(!RatingEngine.IsRatedQueue(MatchQueue.Casual));
+    True(RatingEngine.IsRatedQueue(MatchQueue.Casual));
     True(!RatingEngine.IsRatedQueue(MatchQueue.Custom));
     True(!RatingEngine.IsRatedQueue(MatchQueue.Unknown));
 }
@@ -111,9 +111,9 @@ static void EpochReset()
         new(CombatJob.SGE, MatchOutcome.Loss, MatchQueue.Ranked, 1),
     ];
     var resetDrk = RatingEngine.ReplayEpoch(CombatJob.DRK, 1, events);
-    Equal(1, resetDrk.Matches);
-    Equal(1, resetDrk.Wins);
-    Equal(1532, resetDrk.Rating);
+    Equal(2, resetDrk.Matches);
+    Equal(2, resetDrk.Wins);
+    Equal(1563, resetDrk.Rating);
 }
 
 static void ResetEpochManagement()
@@ -132,10 +132,11 @@ static void ResetEpochManagement()
     True(!RatingEpochs.TryReset(epochs, events, CombatJob.DRK));
 
     var resetAll = RatingEpochs.ResetAll(epochs, events);
-    Equal(1, resetAll.Count);
-    Equal(CombatJob.SGE, resetAll[0]);
+    Equal(2, resetAll.Count);
+    Equal(CombatJob.PLD, resetAll[0]);
+    Equal(CombatJob.SGE, resetAll[1]);
     Equal(1, RatingEpochs.Current(epochs, CombatJob.SGE));
-    Equal(0, RatingEpochs.Current(epochs, CombatJob.PLD));
+    Equal(1, RatingEpochs.Current(epochs, CombatJob.PLD));
 }
 
 static void PluginDataMigrationAndResetRoundTrip()
@@ -157,9 +158,9 @@ static void PluginDataMigrationAndResetRoundTrip()
     Equal(PluginDataMigrations.CurrentSchemaVersion, data.Version);
     Equal(RatingEngine.RulesVersion, data.RatingRulesVersion);
     Equal(3, data.Matches.Count);
-    Equal(0, data.Matches[0].RatingDelta);
-    Equal(1500, data.Matches[1].RatingBefore);
-    Equal(1468, data.Matches[1].RatingAfter);
+    Equal(32, data.Matches[0].RatingDelta);
+    Equal(1532, data.Matches[1].RatingBefore);
+    Equal(1499, data.Matches[1].RatingAfter);
     Equal(1532, data.Matches[2].RatingAfter);
 
     var events = data.Matches.Select(ToEvent).ToArray();

@@ -48,7 +48,7 @@ internal sealed class MainWindow : Window
     public void NotifyMatch(MatchRecord match)
     {
         SetStatus(RatingEngine.IsRatedQueue(match.Queue)
-            ? $"Recorded Ranked {match.Outcome} on {match.LocalJob}: {match.RatingAfter} ({match.RatingDelta:+#;-#;0})."
+            ? $"Recorded {match.Queue} {match.Outcome} on {match.LocalJob}: {match.RatingAfter} ({match.RatingDelta:+#;-#;0})."
             : $"Recorded {match.Queue} {match.Outcome} on {match.LocalJob}; rating unchanged.");
     }
 
@@ -107,13 +107,13 @@ internal sealed class MainWindow : Window
         var currentLosses = ratings.Sum(x => x.Losses);
 
         ImGui.TextColored(new Vector4(0.82f, 0.75f, 1f, 1f), "JOB-SPECIFIC CRYSTAL RATING");
-        ImGui.TextWrapped("Each job climbs independently. Only Ranked wins and losses move the rating; Casual, Custom, and scoreboard performance never change it.");
+        ImGui.TextWrapped("Each job climbs independently. Casual and Ranked wins and losses move the rating; Custom and Unknown-queue matches and scoreboard performance never change it.");
         ImGui.TextDisabled($"Current rating epochs  •  Matches  {currentMatches}     Wins  {currentWins}     Losses  {currentLosses}");
         ImGui.Spacing();
 
         if (ratings.Count == 0)
         {
-            ImGui.TextDisabled("No matches recorded yet. Finish a Crystalline Conflict match to create your first job rating.");
+            ImGui.TextDisabled("No rated Casual or Ranked matches recorded yet. Finish a matchmade Crystalline Conflict match to create your first job rating.");
             return;
         }
 
@@ -211,7 +211,7 @@ internal sealed class MainWindow : Window
 
     private void DrawLeaderboard()
     {
-        ImGui.TextWrapped("Sharing is optional. A common backend is required for a cross-user leaderboard. Only Ranked matches are submitted, containing your chosen display name, job, win/loss, queue, arena ID, duration, and your own scoreboard values. Other players are never uploaded.");
+        ImGui.TextWrapped("Sharing is optional. A common backend is required for a cross-user leaderboard. Casual and Ranked matches are submitted, containing your chosen display name, job, win/loss, queue, arena ID, duration, and your own scoreboard values. Other players are never uploaded.");
         ImGui.Spacing();
 
         var displayName = configuration.DisplayName;
@@ -241,7 +241,7 @@ internal sealed class MainWindow : Window
         {
             ImGui.TextUnformatted($"Registered as {configuration.DisplayName} ({configuration.PlayerId})");
             var share = configuration.ShareLeaderboard;
-            if (ImGui.Checkbox("Automatically submit newly recorded non-custom matches", ref share))
+            if (ImGui.Checkbox("Automatically submit new Casual and Ranked matches", ref share))
             {
                 configuration.ShareLeaderboard = share;
                 saveConfiguration();

@@ -62,7 +62,7 @@ public sealed class LeaderboardStore
         Validation.ValidateSubmission(submission);
         if (!RatingEngine.IsRatedQueue(submission.Queue))
         {
-            throw new ArgumentException("Only Ranked matches can affect the community leaderboard.");
+            throw new ArgumentException("Only Casual and Ranked matches can affect the community leaderboard.");
         }
 
         lock (gate)

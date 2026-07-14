@@ -15,8 +15,8 @@ reduce operations work, but they are still a backend service in this design.
 1. FFXIV produces its normal Crystalline Conflict result payload.
 2. The plugin copies that post-match payload after the match has ended.
 3. The full scoreboard is stored locally in `matches.json`.
-4. The rating engine replays only Ranked wins/losses, independently for each
-   job and local rating epoch.
+4. The rating engine replays Casual and Ranked wins/losses, independently for
+   each job and local rating epoch.
 5. If the user explicitly opts in, the plugin submits only the local player's
    match fields to the configured HTTPS API.
 6. The server validates the event and recomputes rating itself.
@@ -37,8 +37,9 @@ This is an Elo-like estimate against a fixed 1500 reference pool:
 - `K = 32` afterwards;
 - rating is clamped to `0..3000`;
 - every job starts at 1500 and has independent history;
-- only Ranked matches affect rating or get uploaded;
-- Casual and Custom matches remain available as local statistics;
+- Casual and Ranked matches affect the same rating and can be uploaded after
+  the user opts in;
+- Custom and Unknown-queue matches remain available only as local statistics;
 - damage, K/D/A, healing, and crystal time never affect rating.
 
 The fixed baseline is deliberate. FFXIV does not expose the community rating of
@@ -60,9 +61,9 @@ The wider logistic scale is calibrated to the visible 100-point divisions:
 ## Local rating resets
 
 The plugin stores an integer rating epoch for every played job. Resetting a job
-increments only that job's epoch, so subsequent Ranked results replay from
-1500 while old matches and scoreboards remain visible. Epochs avoid clock and
-late-arrival problems that a timestamp cutoff would introduce.
+increments only that job's epoch, so subsequent Casual and Ranked results replay
+from 1500 while old matches and scoreboards remain visible. Epochs avoid clock
+and late-arrival problems that a timestamp cutoff would introduce.
 
 Local resets never remove community leaderboard results. Allowing users to
 delete only their losing public history would make the shared ladder

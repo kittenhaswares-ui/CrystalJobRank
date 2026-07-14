@@ -61,7 +61,7 @@ public sealed class Plugin : IDalamudPlugin
 
         commandManager.AddHandler(Command, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open Crystal Job Rank. Use /cjr reset <JOB|all> to reset local Ranked ratings.",
+            HelpMessage = "Open Crystal Job Rank. Use /cjr reset <JOB|all> to reset local job ratings.",
         });
 
         pluginInterface.UiBuilder.Draw += Draw;
@@ -138,12 +138,12 @@ public sealed class Plugin : IDalamudPlugin
             var resetJobs = matchStore.ResetAllRatings();
             if (resetJobs.Count == 0)
             {
-                Print("No active Ranked job ratings to reset.");
+                Print("No active job ratings to reset.");
                 return;
             }
 
             var jobs = string.Join(", ", resetJobs);
-            var message = $"Reset {resetJobs.Count} local Ranked ratings ({jobs}) to 1500 Bronze. Match history kept. Community leaderboard unchanged.";
+            var message = $"Reset {resetJobs.Count} local job ratings ({jobs}) to 1500 Bronze. Match history kept. Community leaderboard unchanged.";
             mainWindow.SetStatus(message);
             Print(message);
             log.Information("Reset all active local rating epochs for {Jobs}.", jobs);
@@ -158,7 +158,7 @@ public sealed class Plugin : IDalamudPlugin
 
         if (!matchStore.ResetRating(job))
         {
-            Print($"{job} has no active Ranked rating to reset.");
+            Print($"{job} has no active rating to reset.");
             return;
         }
 
