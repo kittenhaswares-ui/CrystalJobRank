@@ -5,7 +5,8 @@
     "Punchline": "Post-match CC stats and a separate rating for every job.",
     "Description": "Records Crystalline Conflict result screens, keeps local match history and calculates a transparent win/loss-only rating for each job. Use /cjr.",
     "InternalName": "CrystalJobRank.Plugin",
-    "AssemblyVersion": "0.1.0.0",
+    "AssemblyVersion": "0.2.0.0",
+    "Changelog": "Redesigned job rating cards with job-color progress bars and increasingly ornate rank badges from Bronze to Crystal.",
     "RepoUrl": "https://github.com/kittenhaswares-ui/CrystalJobRank",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 15,
@@ -19,6 +20,6 @@
     "DownloadLinkInstall": "https://raw.githubusercontent.com/kittenhaswares-ui/CrystalJobRank/main/dist/latest.zip",
     "DownloadLinkUpdate": "https://raw.githubusercontent.com/kittenhaswares-ui/CrystalJobRank/main/dist/latest.zip",
     "DownloadLinkTesting": "https://raw.githubusercontent.com/kittenhaswares-ui/CrystalJobRank/main/dist/latest.zip",
-    "LastUpdate": "1784045590"
+    "LastUpdate": "1784046759"
   }
 ]

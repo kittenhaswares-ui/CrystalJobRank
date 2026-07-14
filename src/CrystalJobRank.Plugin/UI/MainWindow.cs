@@ -102,8 +102,9 @@ internal sealed class MainWindow : Window
         var ratings = matchStore.Ratings();
         var matches = matchStore.Snapshot().Where(x => x.Queue != MatchQueue.Custom).ToArray();
 
-        ImGui.TextUnformatted("Transparent, unofficial rating. Only wins and losses count; performance stats do not.");
-        ImGui.TextUnformatted($"Recorded matches: {matches.Length}   Wins: {matches.Count(x => x.Outcome == MatchOutcome.Win)}   Losses: {matches.Count(x => x.Outcome == MatchOutcome.Loss)}");
+        ImGui.TextColored(new Vector4(0.82f, 0.75f, 1f, 1f), "JOB-SPECIFIC CRYSTAL RATING");
+        ImGui.TextWrapped("Each job climbs independently. Only wins and losses move the rating; scoreboard performance never changes it.");
+        ImGui.TextDisabled($"Recorded matches  {matches.Length}     Wins  {matches.Count(x => x.Outcome == MatchOutcome.Win)}     Losses  {matches.Count(x => x.Outcome == MatchOutcome.Loss)}");
         ImGui.Spacing();
 
         if (ratings.Count == 0)
@@ -112,25 +113,14 @@ internal sealed class MainWindow : Window
             return;
         }
 
-        const ImGuiTableFlags flags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp;
-        if (!ImGui.BeginTable("##ratings", 6, flags)) return;
-        ImGui.TableSetupColumn("Job");
-        ImGui.TableSetupColumn("Rating");
-        ImGui.TableSetupColumn("Matches");
-        ImGui.TableSetupColumn("Wins");
-        ImGui.TableSetupColumn("Losses");
-        ImGui.TableSetupColumn("Win rate");
-        ImGui.TableHeadersRow();
-
-        foreach (var rating in ratings)
+        const ImGuiTableFlags flags = ImGuiTableFlags.SizingStretchSame | ImGuiTableFlags.PadOuterX;
+        if (!ImGui.BeginTable("##rating-cards", 2, flags)) return;
+        for (var index = 0; index < ratings.Count; index++)
         {
-            ImGui.TableNextRow();
-            Cell(rating.Job.ToString());
-            Cell(rating.Rating.ToString("N0"));
-            Cell(rating.Matches.ToString("N0"));
-            Cell(rating.Wins.ToString("N0"));
-            Cell(rating.Losses.ToString("N0"));
-            Cell($"{rating.WinRate:P1}");
+            if (index % 2 == 0) ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(index % 2);
+            RankVisuals.DrawRatingCard(ratings[index], ImGui.GetContentRegionAvail().X);
+            ImGui.Spacing();
         }
 
         ImGui.EndTable();

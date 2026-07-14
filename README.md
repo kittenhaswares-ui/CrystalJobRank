@@ -15,6 +15,12 @@ official competitive ladder. It is a transparent, outcome-only estimate:
 - the first 10 matches use a larger provisional adjustment;
 - damage, kills, and healing are displayed but never influence rating.
 
+The rating screen uses job-colored progress bars and six visual tiers:
+Bronze below 1200, Silver at 1200, Gold at 1400, Platinum at 1600,
+Diamond at 1800, and Crystal at 2000. The colors follow the familiar
+community/FFLogs job palette; Square Enix does not publish an official set of
+job-color hex values.
+
 This repository also contains an optional leaderboard API. A shared leaderboard
 cannot work from a static GitHub repository alone: it needs a common service
 that receives opt-in match submissions. The included backend can be self-hosted
