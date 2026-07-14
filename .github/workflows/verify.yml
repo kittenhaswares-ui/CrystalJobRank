@@ -1,0 +1,21 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core-and-server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build core
+        run: dotnet build src/CrystalJobRank.Core/CrystalJobRank.Core.csproj -c Release
+      - name: Build server
+        run: dotnet build src/CrystalJobRank.Server/CrystalJobRank.Server.csproj -c Release
+      - name: Run rating checks
+        run: dotnet run --project tests/CrystalJobRank.Core.SelfTest -c Release
+

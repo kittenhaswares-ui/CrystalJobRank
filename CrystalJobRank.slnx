@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="src/CrystalJobRank.Core/CrystalJobRank.Core.csproj" />
+  <Project Path="src/CrystalJobRank.Plugin/CrystalJobRank.Plugin.csproj" />
+  <Project Path="src/CrystalJobRank.Server/CrystalJobRank.Server.csproj" />
+  <Project Path="tests/CrystalJobRank.Core.SelfTest/CrystalJobRank.Core.SelfTest.csproj" />
+</Solution>
+
