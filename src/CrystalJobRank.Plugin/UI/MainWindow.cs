@@ -11,6 +11,17 @@ namespace CrystalJobRank.Plugin.UI;
 
 internal sealed class MainWindow : Window
 {
+    private static readonly CombatJob[] LeaderboardTanks =
+        [CombatJob.PLD, CombatJob.WAR, CombatJob.DRK, CombatJob.GNB];
+    private static readonly CombatJob[] LeaderboardHealers =
+        [CombatJob.WHM, CombatJob.SCH, CombatJob.AST, CombatJob.SGE];
+    private static readonly CombatJob[] LeaderboardMelee =
+        [CombatJob.MNK, CombatJob.DRG, CombatJob.NIN, CombatJob.SAM, CombatJob.RPR, CombatJob.VPR];
+    private static readonly CombatJob[] LeaderboardPhysicalRanged =
+        [CombatJob.BRD, CombatJob.MCH, CombatJob.DNC];
+    private static readonly CombatJob[] LeaderboardCasters =
+        [CombatJob.BLM, CombatJob.SMN, CombatJob.RDM, CombatJob.PCT];
+
     private readonly PluginConfiguration configuration;
     private readonly MatchStore matchStore;
     private readonly LeaderboardClient leaderboardClient;
@@ -20,8 +31,12 @@ internal sealed class MainWindow : Window
     private readonly object stateGate = new();
 
     private Guid? selectedMatchId;
-    private CombatJob selectedLeaderboardJob = CombatJob.PLD;
+    private CombatJob selectedLeaderboardJob;
     private IReadOnlyList<LeaderboardRow> leaderboard = [];
+    private CombatJob? loadedLeaderboardJob;
+    private CombatJob? leaderboardLoadingJob;
+    private string loadedLeaderboardServerBaseUrl = string.Empty;
+    private DateTime? leaderboardLoadedAtUtc;
     private string status = "Ready. New CC result screens will be recorded automatically.";
     private bool statusIsError;
     private bool networkBusy;
@@ -42,6 +57,7 @@ internal sealed class MainWindow : Window
         this.leaderboardOutbox = leaderboardOutbox;
         this.textureProvider = textureProvider;
         this.saveConfiguration = saveConfiguration;
+        selectedLeaderboardJob = matchStore.Snapshot().FirstOrDefault()?.LocalJob ?? CombatJob.PLD;
 
         Size = new Vector2(920, 680);
         SizeCondition = ImGuiCond.FirstUseEver;
@@ -228,6 +244,22 @@ internal sealed class MainWindow : Window
 
     private void DrawLeaderboard()
     {
+        bool currentNetworkBusy;
+        CombatJob? currentLoadedJob;
+        CombatJob? currentLoadingJob;
+        string currentLoadedServerBaseUrl;
+        DateTime? currentLoadedAtUtc;
+        IReadOnlyList<LeaderboardRow> currentLeaderboard;
+        lock (stateGate)
+        {
+            currentNetworkBusy = networkBusy;
+            currentLoadedJob = loadedLeaderboardJob;
+            currentLoadingJob = leaderboardLoadingJob;
+            currentLoadedServerBaseUrl = loadedLeaderboardServerBaseUrl;
+            currentLoadedAtUtc = leaderboardLoadedAtUtc;
+            currentLeaderboard = leaderboard;
+        }
+
         ImGui.TextColored(new Vector4(0.82f, 0.75f, 1f, 1f), "OPTIONAL COMMUNITY LEADERBOARD");
         ImGui.TextWrapped("This experimental ladder is community-reported and cannot be cheat-proof. Creating an identity is optional, uses only your chosen public alias, and never uploads your FFXIV identity or another player's data.");
         ImGui.TextWrapped("For each new Casual or Ranked match shared after opt-in, the plugin sends its time, job, result, queue, arena ID, duration, random fingerprint, and your own scoreboard values. The hosted service discards raw arena, duration, and scoreboard values after validation, but retains a one-way hash of the complete submission for duplicate protection.");
@@ -235,25 +267,26 @@ internal sealed class MainWindow : Window
         ImGui.Spacing();
 
         var displayName = configuration.DisplayName;
-        if (configuration.IsRegistered) ImGui.BeginDisabled();
+        if (configuration.IsRegistered || currentNetworkBusy) ImGui.BeginDisabled();
         if (ImGui.InputText("Public display name", ref displayName, 24))
         {
             configuration.DisplayName = displayName;
             saveConfiguration();
         }
-        if (configuration.IsRegistered) ImGui.EndDisabled();
+        if (configuration.IsRegistered || currentNetworkBusy) ImGui.EndDisabled();
         ImGui.TextDisabled(configuration.IsRegistered
             ? "The public alias is locked after registration. Delete the online identity to choose another."
             : "Use a pseudonym if you do not want the public entry linked to your character.");
 
         var serverUrl = configuration.ServerBaseUrl;
-        if (configuration.IsRegistered) ImGui.BeginDisabled();
+        if (configuration.IsRegistered || currentNetworkBusy) ImGui.BeginDisabled();
         if (ImGui.InputText("Server URL (advanced)", ref serverUrl, 256))
         {
             configuration.ServerBaseUrl = serverUrl;
             saveConfiguration();
+            ClearLeaderboardSnapshot();
         }
-        if (configuration.IsRegistered) ImGui.EndDisabled();
+        if (configuration.IsRegistered || currentNetworkBusy) ImGui.EndDisabled();
         if (configuration.IsRegistered)
         {
             ImGui.TextDisabled("The server address is locked while this leaderboard identity exists, so its API key cannot be sent to another host.");
@@ -262,15 +295,30 @@ internal sealed class MainWindow : Window
         {
             ImGui.TextDisabled("A custom server has a different operator and may follow a different privacy policy.");
         }
+        var validServerUrl = IsValidServerBaseUrl(configuration.ServerBaseUrl);
+        if (!validServerUrl)
+        {
+            ImGui.TextColored(
+                new Vector4(1f, 0.42f, 0.42f, 1f),
+                "Enter an HTTPS leaderboard URL (HTTP is allowed only for localhost development)." );
+        }
 
         if (!configuration.IsRegistered)
         {
-            if (ImGui.Button(networkBusy ? "Registering..." : "Create leaderboard identity") && !networkBusy)
+            var validDisplayName = IsValidDisplayName(configuration.DisplayName);
+            if (currentNetworkBusy || !validDisplayName || !validServerUrl) ImGui.BeginDisabled();
+            if (ImGui.Button(currentNetworkBusy ? "Please wait..." : "Create leaderboard identity") &&
+                !currentNetworkBusy && validDisplayName && validServerUrl)
             {
                 _ = RegisterAsync();
             }
+            if (currentNetworkBusy || !validDisplayName || !validServerUrl) ImGui.EndDisabled();
             ImGui.SameLine();
-            ImGui.TextDisabled("This creates only the alias and key; sharing starts separately below.");
+            ImGui.TextDisabled(!validDisplayName
+                ? "Enter a valid 2-24 character public display name first."
+                : !validServerUrl
+                    ? "Enter a valid leaderboard server URL first."
+                    : "This creates only the alias and key; sharing starts separately below.");
         }
         else
         {
@@ -286,66 +334,145 @@ internal sealed class MainWindow : Window
 
             if (!confirmAccountDeletion)
             {
-                if (ImGui.Button("Delete leaderboard account")) confirmAccountDeletion = true;
+                if (currentNetworkBusy) ImGui.BeginDisabled();
+                if (ImGui.Button("Delete leaderboard account") && !currentNetworkBusy) confirmAccountDeletion = true;
+                if (currentNetworkBusy) ImGui.EndDisabled();
             }
             else
             {
                 ImGui.TextColored(new Vector4(1f, 0.42f, 0.42f, 1f), "This immediately removes the identity and all submitted matches from the active service. Cloudflare recovery backups can retain a copy for up to 7 days.");
-                if (ImGui.Button(networkBusy ? "Deleting..." : "Confirm online deletion") && !networkBusy)
+                if (currentNetworkBusy) ImGui.BeginDisabled();
+                if (ImGui.Button(currentNetworkBusy ? "Please wait..." : "Confirm online deletion") && !currentNetworkBusy)
                 {
                     _ = DeleteAccountAsync();
                 }
+                if (currentNetworkBusy) ImGui.EndDisabled();
                 ImGui.SameLine();
                 if (ImGui.Button("Cancel")) confirmAccountDeletion = false;
             }
         }
 
         ImGui.Separator();
-        if (ImGui.BeginCombo("Job", selectedLeaderboardJob.ToString()))
-        {
-            foreach (var job in Enum.GetValues<CombatJob>().Where(x => x != CombatJob.Unknown))
-            {
-                var selected = job == selectedLeaderboardJob;
-                if (ImGui.Selectable(job.ToString(), selected)) selectedLeaderboardJob = job;
-            }
-            ImGui.EndCombo();
-        }
+        ImGui.TextColored(RankVisuals.JobColor(selectedLeaderboardJob), $"{selectedLeaderboardJob} COMMUNITY STANDINGS");
+        ImGui.TextWrapped("Every job has a completely separate rating and ranking. Choose one job below; the public board combines participating players across all regions.");
+        ImGui.TextDisabled("Character worlds and regions are not uploaded, displayed, or used as filters.");
+        ImGui.Spacing();
 
-        if (ImGui.Button(networkBusy ? "Loading..." : "Refresh leaderboard") && !networkBusy)
+        if (currentNetworkBusy) ImGui.BeginDisabled();
+        var jobChanged = DrawLeaderboardJobGroup("Tank", LeaderboardTanks);
+        jobChanged |= DrawLeaderboardJobGroup("Healer", LeaderboardHealers);
+        jobChanged |= DrawLeaderboardJobGroup("Melee", LeaderboardMelee);
+        jobChanged |= DrawLeaderboardJobGroup("Physical ranged", LeaderboardPhysicalRanged);
+        jobChanged |= DrawLeaderboardJobGroup("Caster", LeaderboardCasters);
+        if (currentNetworkBusy) ImGui.EndDisabled();
+        if (jobChanged && validServerUrl && !currentNetworkBusy)
+        {
+            _ = RefreshLeaderboardAsync();
+            currentNetworkBusy = true;
+            currentLoadingJob = selectedLeaderboardJob;
+        }
+        ImGui.Spacing();
+
+        var selectedServerBaseUrl = NormalizeServerBaseUrl(configuration.ServerBaseUrl);
+        var hasLoadedSelection = currentLoadedJob == selectedLeaderboardJob &&
+            string.Equals(
+                currentLoadedServerBaseUrl,
+                selectedServerBaseUrl,
+                StringComparison.OrdinalIgnoreCase);
+        var buttonLabel = currentLoadingJob.HasValue
+            ? $"Loading {currentLoadingJob}..."
+            : hasLoadedSelection
+                ? $"Refresh {selectedLeaderboardJob} standings"
+                : $"Load {selectedLeaderboardJob} standings";
+        if (currentNetworkBusy || !validServerUrl) ImGui.BeginDisabled();
+        if (ImGui.Button(buttonLabel) && !currentNetworkBusy && validServerUrl)
         {
             _ = RefreshLeaderboardAsync();
         }
+        if (currentNetworkBusy || !validServerUrl) ImGui.EndDisabled();
 
-        if (leaderboard.Count == 0)
+        ImGui.SameLine();
+        if (currentLoadingJob == selectedLeaderboardJob)
         {
-            ImGui.TextDisabled("No leaderboard rows loaded for this job.");
+            ImGui.TextDisabled(hasLoadedSelection
+                ? "Refreshing; the previous snapshot remains visible."
+                : "Loading the top 50 entries...");
+        }
+        else if (hasLoadedSelection && currentLoadedAtUtc.HasValue)
+        {
+            ImGui.TextDisabled($"Top {currentLeaderboard.Count} • updated {currentLoadedAtUtc.Value.ToLocalTime():g}");
+        }
+        else
+        {
+            ImGui.TextDisabled($"{selectedLeaderboardJob} has not been loaded yet.");
+        }
+
+        if (!hasLoadedSelection)
+        {
+            ImGui.Spacing();
+            ImGui.TextDisabled($"Load {selectedLeaderboardJob} to view only that job's current community standings.");
             return;
         }
 
-        const ImGuiTableFlags flags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp;
-        if (!ImGui.BeginTable("##leaderboard", 7, flags)) return;
-        foreach (var header in new[] { "#", "Name", "Rating", "Matches", "Wins", "Losses", "Win rate" })
+        if (currentLeaderboard.Count == 0)
+        {
+            ImGui.Spacing();
+            ImGui.TextDisabled($"No {selectedLeaderboardJob} entries have been shared in the current community season yet.");
+            return;
+        }
+
+        ImGui.Spacing();
+        const ImGuiTableFlags flags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
+                                      ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingStretchProp;
+        var tableHeight = MathF.Max(220f * ImGuiHelpers.GlobalScale, ImGui.GetContentRegionAvail().Y);
+        if (!ImGui.BeginTable($"##leaderboard-{selectedLeaderboardJob}", 7, flags, new Vector2(0, tableHeight))) return;
+        foreach (var header in new[] { "#", "Player", "Tier", "Rating", "Matches", "Record", "Win rate" })
         {
             ImGui.TableSetupColumn(header);
         }
         ImGui.TableHeadersRow();
-        foreach (var row in leaderboard)
+        foreach (var row in currentLeaderboard)
         {
             ImGui.TableNextRow();
             Cell(row.Rank.ToString());
-            Cell(row.DisplayName);
+            var isOwnEntry = configuration.IsRegistered &&
+                string.Equals(row.DisplayName, configuration.DisplayName, StringComparison.OrdinalIgnoreCase);
+            Cell(isOwnEntry ? $"{row.DisplayName}  (you)" : row.DisplayName);
+            var band = RankVisuals.GetBand(row.Rating);
+            ColoredCell(band.Name, band.MetalColor);
             Cell(row.Rating.ToString("N0"));
             Cell(row.Matches.ToString("N0"));
-            Cell(row.Wins.ToString("N0"));
-            Cell(row.Losses.ToString("N0"));
+            Cell($"{row.Wins:N0}W  {row.Losses:N0}L");
             Cell($"{row.WinRate:P1}");
         }
         ImGui.EndTable();
     }
 
+    private bool DrawLeaderboardJobGroup(string label, IReadOnlyList<CombatJob> jobs)
+    {
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextDisabled(label);
+        ImGui.SameLine();
+        var changed = false;
+        for (var index = 0; index < jobs.Count; index++)
+        {
+            var job = jobs[index];
+            var selected = job == selectedLeaderboardJob;
+            if (selected) ImGui.PushStyleColor(ImGuiCol.Text, RankVisuals.JobColor(job));
+            if (ImGui.RadioButton($"{job}##leaderboard-job-{job}", selected))
+            {
+                selectedLeaderboardJob = job;
+                changed = true;
+            }
+            if (selected) ImGui.PopStyleColor();
+            if (index < jobs.Count - 1) ImGui.SameLine();
+        }
+        return changed;
+    }
+
     private async Task RegisterAsync()
     {
-        networkBusy = true;
+        if (!TryBeginNetworkOperation()) return;
         SetStatus("Registering leaderboard identity...");
         try
         {
@@ -363,18 +490,35 @@ internal sealed class MainWindow : Window
         }
         finally
         {
-            networkBusy = false;
+            EndNetworkOperation();
         }
     }
 
     private async Task RefreshLeaderboardAsync()
     {
-        networkBusy = true;
-        SetStatus($"Loading {selectedLeaderboardJob} leaderboard...");
+        if (!TryBeginNetworkOperation()) return;
+        var requestedJob = selectedLeaderboardJob;
+        var requestedServerBaseUrl = NormalizeServerBaseUrl(configuration.ServerBaseUrl);
+        lock (stateGate) leaderboardLoadingJob = requestedJob;
+        SetStatus($"Loading {requestedJob} community standings...");
         try
         {
-            leaderboard = await leaderboardClient.GetLeaderboardAsync(configuration.ServerBaseUrl, selectedLeaderboardJob);
-            SetStatus($"Loaded {leaderboard.Count} {selectedLeaderboardJob} leaderboard entries.");
+            var rows = await leaderboardClient.GetLeaderboardAsync(requestedServerBaseUrl, requestedJob);
+            if (rows.Any(row => row.Job != requestedJob))
+            {
+                throw new InvalidOperationException("The leaderboard server returned entries for a different job.");
+            }
+
+            lock (stateGate)
+            {
+                leaderboard = rows.ToArray();
+                loadedLeaderboardJob = requestedJob;
+                loadedLeaderboardServerBaseUrl = requestedServerBaseUrl;
+                leaderboardLoadedAtUtc = DateTime.UtcNow;
+            }
+            SetStatus(rows.Count == 0
+                ? $"No {requestedJob} entries exist in the current community season yet."
+                : $"Loaded {rows.Count} {requestedJob} community leaderboard entries.");
         }
         catch (Exception exception)
         {
@@ -382,13 +526,17 @@ internal sealed class MainWindow : Window
         }
         finally
         {
-            networkBusy = false;
+            lock (stateGate)
+            {
+                if (leaderboardLoadingJob == requestedJob) leaderboardLoadingJob = null;
+            }
+            EndNetworkOperation();
         }
     }
 
     private async Task DeleteAccountAsync()
     {
-        networkBusy = true;
+        if (!TryBeginNetworkOperation()) return;
         SetStatus("Deleting leaderboard identity and submitted matches...");
         try
         {
@@ -409,8 +557,61 @@ internal sealed class MainWindow : Window
         }
         finally
         {
-            networkBusy = false;
+            EndNetworkOperation();
         }
+    }
+
+    private bool TryBeginNetworkOperation()
+    {
+        lock (stateGate)
+        {
+            if (networkBusy) return false;
+            networkBusy = true;
+            return true;
+        }
+    }
+
+    private void EndNetworkOperation()
+    {
+        lock (stateGate) networkBusy = false;
+    }
+
+    private void ClearLeaderboardSnapshot()
+    {
+        lock (stateGate)
+        {
+            leaderboard = [];
+            loadedLeaderboardJob = null;
+            loadedLeaderboardServerBaseUrl = string.Empty;
+            leaderboardLoadedAtUtc = null;
+        }
+    }
+
+    private static bool IsValidDisplayName(string value)
+    {
+        try
+        {
+            Validation.NormalizeDisplayName(value);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static string NormalizeServerBaseUrl(string value) => value.Trim().TrimEnd('/');
+
+    private static bool IsValidServerBaseUrl(string value)
+    {
+        if (!Uri.TryCreate(NormalizeServerBaseUrl(value) + "/", UriKind.Absolute, out var uri) ||
+            !string.IsNullOrEmpty(uri.UserInfo))
+        {
+            return false;
+        }
+
+        return uri.Scheme == Uri.UriSchemeHttps ||
+               (uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback);
     }
 
     private void UpdateOutboxState() => leaderboardOutbox.UpdateState(
@@ -423,5 +624,11 @@ internal sealed class MainWindow : Window
     {
         ImGui.TableNextColumn();
         ImGui.TextUnformatted(value);
+    }
+
+    private static void ColoredCell(string value, Vector4 color)
+    {
+        ImGui.TableNextColumn();
+        ImGui.TextColored(color, value);
     }
 }

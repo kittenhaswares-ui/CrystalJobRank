@@ -7,7 +7,14 @@ Crystalline Conflict statistics. It records the result screen, keeps a local
 match history, and calculates a separate community-style rating for every job
 you play.
 
-Version 0.4.1 connects the optional community leaderboard to the live hosted
+Version 0.4.2 gives every combat job its own clearly separated community
+standings screen. Jobs are grouped as Tank, Healer, Melee, Physical Ranged,
+and Caster. Choosing a job immediately loads its current top 50 with rank tier,
+rating, match record, win rate, and refresh time. A response is never displayed
+under a different job or server, and existing local ratings, history,
+leaderboard identity, and sharing choice are preserved.
+
+Version 0.4.1 connected the optional community leaderboard to the live hosted
 API at `https://crystal-job-rank-api.kittenhaswares.workers.dev`. Fresh
 installs use that address automatically. Existing installations that still
 contain the old placeholder address migrate once; custom server addresses,

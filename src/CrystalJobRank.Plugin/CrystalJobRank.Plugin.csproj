@@ -1,7 +1,7 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.4.1.0</Version>
-    <AssemblyVersion>0.4.1.0</AssemblyVersion>
+    <Version>0.4.2.0</Version>
+    <AssemblyVersion>0.4.2.0</AssemblyVersion>
     <Authors>Crystal Job Rank contributors</Authors>
     <Description>Post-match Crystalline Conflict job ratings, records, badges, and an optional community leaderboard.</Description>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

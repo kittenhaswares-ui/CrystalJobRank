@@ -186,6 +186,118 @@ describe("CrystalJobRank Worker with D1", () => {
     expect(finalPlayers?.count).toBe(0);
   });
 
+  it("isolates jobs, applies deterministic tie-breakers, and follows the current season", async () => {
+    const timestamp = "2000-01-01T00:00:00.000Z";
+    await env.DB
+      .prepare("INSERT INTO seasons (id, name, started_at_utc) VALUES (2, 'Season 2', ?1)")
+      .bind(timestamp)
+      .run();
+
+    const seededRows = [
+      { displayName: "Zulu Knight", season: 1, job: JOBS.DRK, rating: 1700, matches: 20, wins: 12 },
+      { displayName: "beta Knight", season: 1, job: JOBS.DRK, rating: 1600, matches: 12, wins: 7 },
+      { displayName: "Alpha Knight", season: 1, job: JOBS.DRK, rating: 1600, matches: 12, wins: 6 },
+      { displayName: "Match Tiebreak", season: 1, job: JOBS.DRK, rating: 1600, matches: 5, wins: 3 },
+      { displayName: "Zero Matches", season: 1, job: JOBS.DRK, rating: 3000, matches: 0, wins: 0 },
+      { displayName: "Other Job", season: 1, job: JOBS.NIN, rating: 2500, matches: 10, wins: 10 },
+      { displayName: "Old Champion", season: 2, job: JOBS.DRK, rating: 2800, matches: 30, wins: 25 },
+    ];
+
+    const statements = [];
+    for (const [index, row] of seededRows.entries()) {
+      const suffix = String(index + 1).padStart(12, "0");
+      const playerId = `50000000-0000-0000-0000-${suffix}`;
+      statements.push(
+        env.DB
+          .prepare(
+            `INSERT INTO players (
+               id, display_name, display_name_key, api_key_hash, created_at_utc
+             ) VALUES (?1, ?2, ?3, ?4, ?5)`,
+          )
+          .bind(
+            playerId,
+            row.displayName,
+            row.displayName.toLocaleLowerCase("en-US"),
+            String(index + 1).padStart(64, "0"),
+            timestamp,
+          ),
+        env.DB
+          .prepare(
+            `INSERT INTO ratings (
+               season_id, player_id, job, rating, matches, wins, losses, updated_at_utc
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+          )
+          .bind(
+            row.season,
+            playerId,
+            row.job,
+            row.rating,
+            row.matches,
+            row.wins,
+            row.matches - row.wins,
+            timestamp,
+          ),
+      );
+    }
+    await env.DB.batch(statements);
+
+    const current = await SELF.fetch("https://worker.test/v1/leaderboard?job=drk", {
+      headers: { "CF-Connecting-IP": "192.0.2.60" },
+    });
+    expect(current.status).toBe(200);
+    const currentRows = (await current.json()) as Array<{
+      rank: number;
+      displayName: string;
+      job: number;
+      rating: number;
+      matches: number;
+    }>;
+    expect(currentRows.map(({ rank, displayName }) => [rank, displayName])).toEqual([
+      [1, "Zulu Knight"],
+      [2, "Alpha Knight"],
+      [3, "beta Knight"],
+      [4, "Match Tiebreak"],
+    ]);
+    expect(currentRows.every((row) => row.job === JOBS.DRK)).toBe(true);
+
+    const limited = await SELF.fetch("https://worker.test/v1/leaderboard?job=DRK&limit=2", {
+      headers: { "CF-Connecting-IP": "192.0.2.61" },
+    });
+    expect(limited.status).toBe(200);
+    const limitedRows = (await limited.json()) as Array<{ displayName: string }>;
+    expect(limitedRows.map((row) => row.displayName)).toEqual(["Zulu Knight", "Alpha Knight"]);
+
+    await env.DB.prepare("UPDATE app_settings SET current_season = 2 WHERE id = 1").run();
+    const nextSeason = await SELF.fetch("https://worker.test/v1/leaderboard?job=DRK", {
+      headers: { "CF-Connecting-IP": "192.0.2.62" },
+    });
+    const nextSeasonRows = await nextSeason.json();
+
+    await env.DB.prepare("UPDATE app_settings SET current_season = 1 WHERE id = 1").run();
+    await env.DB.prepare("DELETE FROM players WHERE id LIKE '50000000-%'").run();
+    await env.DB.prepare("DELETE FROM seasons WHERE id = 2").run();
+    await env.DB.prepare("DELETE FROM daily_registration_counts WHERE day_utc = '2000-01-01'").run();
+
+    expect(nextSeason.status).toBe(200);
+    expect(nextSeasonRows).toMatchObject([
+      { rank: 1, displayName: "Old Champion", job: JOBS.DRK, rating: 2800, matches: 30 },
+    ]);
+  });
+
+  it("rejects invalid leaderboard query parameters", async () => {
+    for (const path of [
+      "/v1/leaderboard",
+      "/v1/leaderboard?job=BLU",
+      "/v1/leaderboard?job=DRK&limit=1.5",
+    ]) {
+      const response = await SELF.fetch(`https://worker.test${path}`, {
+        headers: { "CF-Connecting-IP": "192.0.2.63" },
+      });
+      expect(response.status).toBe(400);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+    }
+  });
+
   it("bounds late-match replay after 128 job matches while preserving exact retry idempotency", async () => {
     const registration = await jsonRequest(
       "/v1/players/register",

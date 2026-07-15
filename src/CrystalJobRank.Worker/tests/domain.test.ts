@@ -5,6 +5,8 @@ import {
   displayNameKey,
   JOBS,
   normalizeDisplayName,
+  parseJobQuery,
+  parseLeaderboardLimit,
   parseMatchSubmission,
   replayRating,
   replayRatingEvents,
@@ -42,6 +44,20 @@ describe("Rules v3 rating", () => {
 });
 
 describe("API input contract", () => {
+  it("validates and bounds leaderboard query parameters", () => {
+    expect(parseJobQuery("drk")).toBe(JOBS.DRK);
+    expect(() => parseJobQuery(null)).toThrow(/valid combat job/);
+    expect(() => parseJobQuery("BLU")).toThrow(/valid combat job/);
+
+    expect(parseLeaderboardLimit(null)).toBe(50);
+    expect(parseLeaderboardLimit("")).toBe(50);
+    expect(parseLeaderboardLimit("0")).toBe(1);
+    expect(parseLeaderboardLimit("25")).toBe(25);
+    expect(parseLeaderboardLimit("101")).toBe(100);
+    expect(() => parseLeaderboardLimit("1.5")).toThrow(/integer/);
+    expect(() => parseLeaderboardLimit("-1")).toThrow(/integer/);
+  });
+
   it("normalizes Unicode display names into a stable unique key", () => {
     const composed = normalizeDisplayName("  E\u0301owyn  ");
     expect(composed).toBe("Éowyn");
