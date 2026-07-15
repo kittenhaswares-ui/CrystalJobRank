@@ -1,15 +1,25 @@
 using System.Net.Http.Json;
 using CrystalJobRank.Core;
-using CrystalJobRank.Plugin.Models;
 
 namespace CrystalJobRank.Plugin.Services;
 
 internal sealed class LeaderboardClient : IDisposable
 {
-    private readonly HttpClient httpClient = new()
+    private readonly HttpClient httpClient;
+
+    public LeaderboardClient()
     {
-        Timeout = TimeSpan.FromSeconds(10),
-    };
+        var handler = new HttpClientHandler
+        {
+            AllowAutoRedirect = false,
+            UseCookies = false,
+        };
+        httpClient = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(10),
+            MaxResponseContentBufferSize = 64 * 1024,
+        };
+    }
 
     public void Dispose() => httpClient.Dispose();
 
@@ -19,7 +29,7 @@ internal sealed class LeaderboardClient : IDisposable
         CancellationToken cancellationToken = default)
     {
         var endpoint = BuildUri(baseUrl, "v1/players/register");
-        var response = await httpClient.PostAsJsonAsync(
+        using var response = await httpClient.PostAsJsonAsync(
             endpoint,
             new RegisterRequest(Validation.NormalizeDisplayName(displayName)),
             cancellationToken);
@@ -31,14 +41,14 @@ internal sealed class LeaderboardClient : IDisposable
     public async Task SubmitAsync(
         string baseUrl,
         string apiKey,
-        MatchRecord match,
+        MatchSubmission submission,
         CancellationToken cancellationToken = default)
     {
-        if (!RatingEngine.IsRatedQueue(match.Queue)) return;
+        if (!RatingEngine.IsRatedQueue(submission.Queue)) return;
 
-        var request = new HttpRequestMessage(HttpMethod.Post, BuildUri(baseUrl, "v1/matches"))
+        using var request = new HttpRequestMessage(HttpMethod.Post, BuildUri(baseUrl, "v1/matches"))
         {
-            Content = JsonContent.Create(match.ToSubmission()),
+            Content = JsonContent.Create(submission),
         };
         request.Headers.Add("X-Api-Key", apiKey);
         using var response = await httpClient.SendAsync(request, cancellationToken);
@@ -51,7 +61,9 @@ internal sealed class LeaderboardClient : IDisposable
         CancellationToken cancellationToken = default)
     {
         var endpoint = BuildUri(baseUrl, $"v1/leaderboard?job={Uri.EscapeDataString(job.ToString())}&limit=50");
-        return await httpClient.GetFromJsonAsync<List<LeaderboardRow>>(endpoint, cancellationToken) ?? [];
+        using var response = await httpClient.GetAsync(endpoint, cancellationToken);
+        await EnsureSuccessAsync(response, cancellationToken);
+        return await response.Content.ReadFromJsonAsync<List<LeaderboardRow>>(cancellationToken) ?? [];
     }
 
     public async Task DeleteAccountAsync(
@@ -59,7 +71,7 @@ internal sealed class LeaderboardClient : IDisposable
         string apiKey,
         CancellationToken cancellationToken = default)
     {
-        var request = new HttpRequestMessage(HttpMethod.Delete, BuildUri(baseUrl, "v1/players/me"));
+        using var request = new HttpRequestMessage(HttpMethod.Delete, BuildUri(baseUrl, "v1/players/me"));
         request.Headers.Add("X-Api-Key", apiKey);
         using var response = await httpClient.SendAsync(request, cancellationToken);
         await EnsureSuccessAsync(response, cancellationToken);
@@ -72,9 +84,16 @@ internal sealed class LeaderboardClient : IDisposable
             throw new ArgumentException("The leaderboard URL is invalid.");
         }
 
-        if (root.Scheme != Uri.UriSchemeHttps && !root.IsLoopback)
+        var secureRemote = root.Scheme == Uri.UriSchemeHttps;
+        var localDevelopment = root.Scheme == Uri.UriSchemeHttp && root.IsLoopback;
+        if (!secureRemote && !localDevelopment)
         {
             throw new ArgumentException("Leaderboard connections must use HTTPS (HTTP is allowed only for localhost development)." );
+        }
+
+        if (!string.IsNullOrEmpty(root.UserInfo))
+        {
+            throw new ArgumentException("The leaderboard URL must not contain credentials.");
         }
 
         return new Uri(root, relative);
@@ -84,6 +103,11 @@ internal sealed class LeaderboardClient : IDisposable
     {
         if (response.IsSuccessStatusCode) return;
         var details = await response.Content.ReadAsStringAsync(cancellationToken);
-        throw new HttpRequestException($"Leaderboard server returned {(int)response.StatusCode}: {details}");
+        details = details.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (details.Length > 512) details = details[..512] + "...";
+        throw new HttpRequestException(
+            $"Leaderboard server returned {(int)response.StatusCode}: {details}",
+            null,
+            response.StatusCode);
     }
 }

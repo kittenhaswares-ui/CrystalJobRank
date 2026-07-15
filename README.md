@@ -7,6 +7,15 @@ Crystalline Conflict statistics. It records the result screen, keeps a local
 match history, and calculates a separate community-style rating for every job
 you play.
 
+Version 0.4.1 connects the optional community leaderboard to the live hosted
+API at `https://crystal-job-rank-api.kittenhaswares.workers.dev`. Fresh
+installs use that address automatically. Existing installations that still
+contain the old placeholder address migrate once; custom server addresses,
+leaderboard credentials, and sharing choices are preserved. Registration and
+future match sharing remain separate opt-ins. Temporary upload failures stay in
+a bounded local FIFO queue and retry automatically without writing API keys or
+scoreboard rows to that queue.
+
 Version 0.4 adds official in-game job icons with rank-metal colors and
 job-specific ornaments, persistent personal records, and role achievements.
 The update starts every local job at a fresh 1500 rating exactly once. Match
@@ -61,11 +70,20 @@ opponent MMR. At equilibrium, the visible thresholds correspond to roughly
 the reference pool. This keeps the ladder attainable without pretending to
 know the strength of a particular lobby.
 
-This repository also contains an optional leaderboard API. A shared leaderboard
-cannot work from a static GitHub repository alone: it needs a common service
-that receives opt-in match submissions. The included backend can be self-hosted
-and stores only a chosen display name, the user's job, result, and the local
-player's scoreboard values. Other players' names and IDs never leave the PC.
+This repository also contains the opt-in community leaderboard API. A shared
+leaderboard cannot work from a static GitHub repository alone: it needs a
+common service that receives submissions. The reference service runs on a
+Cloudflare Worker with an EU-jurisdiction D1 database; creating an alias and
+enabling future match sharing are separate choices in the plugin. Raw arena,
+duration, and local scoreboard values are validated but not retained by the
+hosted database. Its production API base URL is
+`https://crystal-job-rank-api.kittenhaswares.workers.dev`, with a public
+[health check](https://crystal-job-rank-api.kittenhaswares.workers.dev/health).
+Other players' names and IDs never leave the PC. See
+[`PRIVACY.md`](PRIVACY.md) for the complete data flow, public fields, retention,
+and deletion behavior. D1 constraints cap costly late-result replays, daily
+registrations, and per-job submission volume so the free shared service has
+authoritative abuse bounds beyond its edge rate limits.
 
 ## Status
 
@@ -77,7 +95,8 @@ signature and packet layout can change.
 
 - `src/CrystalJobRank.Core` — deterministic rating engine and shared contracts.
 - `src/CrystalJobRank.Plugin` — Dalamud API 15 plugin.
-- `src/CrystalJobRank.Server` — optional ASP.NET Core leaderboard API.
+- `src/CrystalJobRank.Worker` — hosted Cloudflare Worker/D1 leaderboard API.
+- `src/CrystalJobRank.Server` — local/self-hosted ASP.NET development API.
 - `tests/CrystalJobRank.Core.SelfTest` — dependency-free rating and persistence checks.
 - `docs/ARCHITECTURE.md` — privacy, trust, and deployment decisions.
 
@@ -99,6 +118,19 @@ dotnet run --project src/CrystalJobRank.Server
 
 The API listens on the URL printed by ASP.NET Core. Configure that HTTPS URL in
 the plugin before opting in to leaderboard sharing.
+
+The production Worker uses pnpm 11 and Cloudflare's local workerd/D1 runtime:
+
+```powershell
+cd src/CrystalJobRank.Worker
+pnpm install
+pnpm check
+pnpm test
+pnpm db:migrate:local
+```
+
+Deployment and EU-database creation are documented in
+[`src/CrystalJobRank.Worker/README.md`](src/CrystalJobRank.Worker/README.md).
 
 ## Dalamud development install
 

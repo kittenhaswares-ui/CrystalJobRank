@@ -20,6 +20,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly WindowSystem windowSystem = new("CrystalJobRank");
     private readonly MatchStore matchStore;
     private readonly LeaderboardClient leaderboardClient;
+    private readonly LeaderboardOutbox leaderboardOutbox;
     private readonly CrystallineConflictCapture capture;
     private readonly MainWindow mainWindow;
     private bool disposed;
@@ -45,10 +46,25 @@ public sealed class Plugin : IDalamudPlugin
 
         Configuration = pluginInterface.GetPluginConfig() as PluginConfiguration ?? new PluginConfiguration();
         Configuration.Initialize(pluginInterface);
+        if (Configuration.MigrateToCurrentVersion()) Configuration.Save();
 
-        matchStore = new MatchStore(pluginInterface.GetPluginConfigDirectory(), log);
+        var configDirectory = pluginInterface.GetPluginConfigDirectory();
+        matchStore = new MatchStore(configDirectory, log);
         leaderboardClient = new LeaderboardClient();
-        mainWindow = new MainWindow(Configuration, matchStore, leaderboardClient, textureProvider, SaveConfiguration);
+        leaderboardOutbox = new LeaderboardOutbox(configDirectory, matchStore, leaderboardClient, log);
+        mainWindow = new MainWindow(
+            Configuration,
+            matchStore,
+            leaderboardClient,
+            leaderboardOutbox,
+            textureProvider,
+            SaveConfiguration);
+        leaderboardOutbox.StatusChanged += OnLeaderboardStatusChanged;
+        leaderboardOutbox.UpdateState(
+            Configuration.ServerBaseUrl,
+            Configuration.PlayerId,
+            Configuration.ApiKey,
+            Configuration.ShareLeaderboard);
         if (matchStore.AppliedOneTimeUpdateReset)
         {
             mainWindow.SetStatus("New season: all local job ratings reset once to 1500. Match history, records, and badges were kept.");
@@ -83,6 +99,8 @@ public sealed class Plugin : IDalamudPlugin
         commandManager.RemoveHandler(Command);
         capture.MatchCaptured -= OnMatchCaptured;
         capture.Dispose();
+        leaderboardOutbox.StatusChanged -= OnLeaderboardStatusChanged;
+        leaderboardOutbox.Dispose();
         leaderboardClient.Dispose();
         windowSystem.RemoveAllWindows();
         Configuration.Save();
@@ -201,10 +219,7 @@ public sealed class Plugin : IDalamudPlugin
                 saved.RatingAfter,
                 saved.RatingDelta);
 
-            if (Configuration.ShareLeaderboard && Configuration.IsRegistered && RatingEngine.IsRatedQueue(saved.Queue))
-            {
-                _ = SubmitSafelyAsync(saved);
-            }
+            leaderboardOutbox.Enqueue(saved.Id);
         }
         catch (Exception exception)
         {
@@ -213,17 +228,8 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private async Task SubmitSafelyAsync(MatchRecord match)
+    private void OnLeaderboardStatusChanged(string message, bool isError)
     {
-        try
-        {
-            await leaderboardClient.SubmitAsync(Configuration.ServerBaseUrl, Configuration.ApiKey, match);
-            mainWindow.SetStatus("Match saved locally and shared with the community leaderboard.");
-        }
-        catch (Exception exception)
-        {
-            log.Warning(exception, "The match was saved locally but could not be uploaded.");
-            mainWindow.SetStatus("Saved locally; leaderboard upload failed.", true);
-        }
+        if (!disposed) mainWindow.SetStatus(message, isError);
     }
 }

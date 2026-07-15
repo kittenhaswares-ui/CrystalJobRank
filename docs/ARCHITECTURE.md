@@ -123,21 +123,51 @@ an official rank or MMR.
 
 ## Backend deployment
 
-The included JSON store is intentionally small and dependency-free. It is safe
-for one server process and an MVP community, but not for multiple replicas or a
-large ladder. Move `LeaderboardStore` to PostgreSQL, D1, or another transactional
-database before scaling horizontally.
+The reference community API is `src/CrystalJobRank.Worker`. It runs on a
+Cloudflare Worker and materializes ratings in D1. Match insertion,
+de-duplication, and a deterministic replay of the affected player/job stream
+share one D1 transactional batch, so parallel and out-of-order uploads cannot
+leave a match without its corresponding rating state.
+
+The hosted reference deployment uses
+`https://crystal-job-rank-api.kittenhaswares.workers.dev` as its API base URL.
+Plugin configuration version 2 makes this the default and migrates only the
+exact former placeholder URL; custom deployments and existing account settings
+remain unchanged.
+
+The production D1 database is created with the EU jurisdiction setting. The
+Worker stores only the chosen alias, authentication hash, rating state, and the
+minimum match fields needed for ordering and de-duplication. Territory,
+duration, and raw scoreboard values are validated in transit but discarded; a
+SHA-256 digest of the complete validated submission is retained to distinguish
+an exact retry from conflicting data.
+
+The plugin persists failed uploads as a bounded, identity-bound FIFO of local
+match IDs. It sends strictly from the head, uses capped exponential backoff,
+and reconstructs each submission from local history, so the retry file contains
+neither API keys nor duplicated scoreboard data. The Worker caps late-event
+replay depth, aggregate daily registrations, and per-job match volume with D1
+triggers; edge rate limits are not the authoritative protection.
+
+`src/CrystalJobRank.Server` remains a dependency-free ASP.NET development and
+self-hosting alternative. Its JSON store is safe for one process and a small
+MVP, but it is not the storage used by the hosted reference leaderboard and
+must not be scaled to multiple replicas.
 
 Public deployment requirements:
 
-- terminate TLS at Kestrel or a trusted reverse proxy;
-- expose only an HTTPS DNS hostname to plugins;
-- persist `/data/server-data.json` or the replacement database;
-- back up data and publish retention/deletion policy;
-- add reverse-proxy rate limits and monitoring;
+- expose only the final HTTPS Worker hostname to plugins and never follow
+  authentication redirects;
+- keep Worker observability free of request bodies, aliases, fingerprints,
+  addresses, and API keys;
+- apply reviewed D1 migrations before deploying matching Worker code;
+- retain database uniqueness constraints even when edge rate limits are used;
+- publish retention and deletion behavior, including D1 Time Travel recovery
+  versions; and
 - do not log `X-Api-Key` headers or request bodies.
 
 The plugin accepts plain HTTP only for loopback development URLs.
+The complete reference-service disclosure is in `PRIVACY.md`.
 
 ## Patch resilience
 

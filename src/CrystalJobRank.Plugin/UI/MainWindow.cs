@@ -14,6 +14,7 @@ internal sealed class MainWindow : Window
     private readonly PluginConfiguration configuration;
     private readonly MatchStore matchStore;
     private readonly LeaderboardClient leaderboardClient;
+    private readonly LeaderboardOutbox leaderboardOutbox;
     private readonly ITextureProvider textureProvider;
     private readonly Action saveConfiguration;
     private readonly object stateGate = new();
@@ -30,6 +31,7 @@ internal sealed class MainWindow : Window
         PluginConfiguration configuration,
         MatchStore matchStore,
         LeaderboardClient leaderboardClient,
+        LeaderboardOutbox leaderboardOutbox,
         ITextureProvider textureProvider,
         Action saveConfiguration)
         : base("Crystal Job Rank###CrystalJobRankMain")
@@ -37,6 +39,7 @@ internal sealed class MainWindow : Window
         this.configuration = configuration;
         this.matchStore = matchStore;
         this.leaderboardClient = leaderboardClient;
+        this.leaderboardOutbox = leaderboardOutbox;
         this.textureProvider = textureProvider;
         this.saveConfiguration = saveConfiguration;
 
@@ -225,21 +228,39 @@ internal sealed class MainWindow : Window
 
     private void DrawLeaderboard()
     {
-        ImGui.TextWrapped("Sharing is optional. A common backend is required for a cross-user leaderboard. Casual and Ranked matches are submitted, containing your chosen display name, job, win/loss, queue, arena ID, duration, and your own scoreboard values. Other players are never uploaded.");
+        ImGui.TextColored(new Vector4(0.82f, 0.75f, 1f, 1f), "OPTIONAL COMMUNITY LEADERBOARD");
+        ImGui.TextWrapped("This experimental ladder is community-reported and cannot be cheat-proof. Creating an identity is optional, uses only your chosen public alias, and never uploads your FFXIV identity or another player's data.");
+        ImGui.TextWrapped("For each new Casual or Ranked match shared after opt-in, the plugin sends its time, job, result, queue, arena ID, duration, random fingerprint, and your own scoreboard values. The hosted service discards raw arena, duration, and scoreboard values after validation, but retains a one-way hash of the complete submission for duplicate protection.");
+        ImGui.TextDisabled("The API key is stored in your local plugin configuration. Turning sharing off pauses queued uploads; re-enabling resumes them. Deleting the identity clears its queue and existing leaderboard entries.");
         ImGui.Spacing();
 
         var displayName = configuration.DisplayName;
-        if (ImGui.InputText("Display name", ref displayName, 24))
+        if (configuration.IsRegistered) ImGui.BeginDisabled();
+        if (ImGui.InputText("Public display name", ref displayName, 24))
         {
             configuration.DisplayName = displayName;
             saveConfiguration();
         }
+        if (configuration.IsRegistered) ImGui.EndDisabled();
+        ImGui.TextDisabled(configuration.IsRegistered
+            ? "The public alias is locked after registration. Delete the online identity to choose another."
+            : "Use a pseudonym if you do not want the public entry linked to your character.");
 
         var serverUrl = configuration.ServerBaseUrl;
-        if (ImGui.InputText("Server URL", ref serverUrl, 256))
+        if (configuration.IsRegistered) ImGui.BeginDisabled();
+        if (ImGui.InputText("Server URL (advanced)", ref serverUrl, 256))
         {
             configuration.ServerBaseUrl = serverUrl;
             saveConfiguration();
+        }
+        if (configuration.IsRegistered) ImGui.EndDisabled();
+        if (configuration.IsRegistered)
+        {
+            ImGui.TextDisabled("The server address is locked while this leaderboard identity exists, so its API key cannot be sent to another host.");
+        }
+        else
+        {
+            ImGui.TextDisabled("A custom server has a different operator and may follow a different privacy policy.");
         }
 
         if (!configuration.IsRegistered)
@@ -249,17 +270,19 @@ internal sealed class MainWindow : Window
                 _ = RegisterAsync();
             }
             ImGui.SameLine();
-            ImGui.TextDisabled("The server returns a random API key; your FFXIV identity is not used.");
+            ImGui.TextDisabled("This creates only the alias and key; sharing starts separately below.");
         }
         else
         {
             ImGui.TextUnformatted($"Registered as {configuration.DisplayName} ({configuration.PlayerId})");
             var share = configuration.ShareLeaderboard;
-            if (ImGui.Checkbox("Automatically submit new Casual and Ranked matches", ref share))
+            if (ImGui.Checkbox("Share future Casual and Ranked results", ref share))
             {
                 configuration.ShareLeaderboard = share;
                 saveConfiguration();
+                UpdateOutboxState();
             }
+            ImGui.TextDisabled($"Pending uploads: {leaderboardOutbox.PendingCount}. Temporary network and server failures retry automatically.");
 
             if (!confirmAccountDeletion)
             {
@@ -267,8 +290,8 @@ internal sealed class MainWindow : Window
             }
             else
             {
-                ImGui.TextColored(new Vector4(1f, 0.42f, 0.42f, 1f), "This permanently deletes the server identity and all submitted matches.");
-                if (ImGui.Button(networkBusy ? "Deleting..." : "Confirm permanent deletion") && !networkBusy)
+                ImGui.TextColored(new Vector4(1f, 0.42f, 0.42f, 1f), "This immediately removes the identity and all submitted matches from the active service. Cloudflare recovery backups can retain a copy for up to 7 days.");
+                if (ImGui.Button(networkBusy ? "Deleting..." : "Confirm online deletion") && !networkBusy)
                 {
                     _ = DeleteAccountAsync();
                 }
@@ -329,9 +352,10 @@ internal sealed class MainWindow : Window
             var registration = await leaderboardClient.RegisterAsync(configuration.ServerBaseUrl, configuration.DisplayName);
             configuration.PlayerId = registration.PlayerId;
             configuration.ApiKey = registration.ApiKey;
-            configuration.ShareLeaderboard = true;
+            configuration.ShareLeaderboard = false;
             saveConfiguration();
-            SetStatus("Leaderboard identity created. New matches will be shared.");
+            UpdateOutboxState();
+            SetStatus("Leaderboard identity created. Enable automatic sharing when you are ready; no matches are uploaded yet.");
         }
         catch (Exception exception)
         {
@@ -368,16 +392,19 @@ internal sealed class MainWindow : Window
         SetStatus("Deleting leaderboard identity and submitted matches...");
         try
         {
+            await leaderboardOutbox.PauseAsync();
             await leaderboardClient.DeleteAccountAsync(configuration.ServerBaseUrl, configuration.ApiKey);
             configuration.PlayerId = null;
             configuration.ApiKey = string.Empty;
             configuration.ShareLeaderboard = false;
             confirmAccountDeletion = false;
             saveConfiguration();
-            SetStatus("Leaderboard account and submitted matches were deleted. Local history was kept.");
+            UpdateOutboxState();
+            SetStatus("Leaderboard account and active submissions were deleted. Local history was kept; recovery backups expire within 7 days.");
         }
         catch (Exception exception)
         {
+            UpdateOutboxState();
             SetStatus(exception.Message, true);
         }
         finally
@@ -385,6 +412,12 @@ internal sealed class MainWindow : Window
             networkBusy = false;
         }
     }
+
+    private void UpdateOutboxState() => leaderboardOutbox.UpdateState(
+        configuration.ServerBaseUrl,
+        configuration.PlayerId,
+        configuration.ApiKey,
+        configuration.ShareLeaderboard);
 
     private static void Cell(string value)
     {

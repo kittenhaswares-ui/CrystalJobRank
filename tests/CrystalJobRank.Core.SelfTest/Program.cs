@@ -1,5 +1,7 @@
 using CrystalJobRank.Core;
 using CrystalJobRank.Plugin.Models;
+using CrystalJobRank.Plugin.Services;
+using System.Net;
 using System.Text.Json;
 
 var tests = new (string Name, Action Run)[]
@@ -29,6 +31,9 @@ var tests = new (string Name, Action Run)[]
     ("invalid rating jobs are rejected", InvalidRatingJobRejected),
     ("validation rejects custom identity input", ValidationRejectsInvalidName),
     ("submission validation rejects invalid enums", SubmissionValidationRejectsInvalidEnums),
+    ("leaderboard outbox stays ordered, bounded, and identity-bound", LeaderboardOutboxOrderingAndBinding),
+    ("leaderboard retry backoff and HTTP classification are bounded", LeaderboardRetryBackoff),
+    ("leaderboard outbox retry state survives JSON persistence", LeaderboardOutboxPersistence),
 };
 
 var failed = 0;
@@ -548,6 +553,78 @@ static void SubmissionValidationRejectsInvalidEnums()
         threw = true;
     }
     True(threw);
+}
+
+static void LeaderboardOutboxOrderingAndBinding()
+{
+    var now = new DateTime(2026, 7, 15, 12, 0, 0, DateTimeKind.Utc);
+    var player = Guid.NewGuid();
+    var state = new LeaderboardOutboxState();
+    True(state.Bind(player, "https://leaderboard.example/"));
+
+    var first = Guid.NewGuid();
+    var second = Guid.NewGuid();
+    Equal(LeaderboardEnqueueResult.Added, state.Enqueue(first, now));
+    Equal(LeaderboardEnqueueResult.Added, state.Enqueue(second, now.AddSeconds(1)));
+    Equal(LeaderboardEnqueueResult.Duplicate, state.Enqueue(first, now.AddSeconds(2)));
+    Equal(first, state.Pending[0].MatchId);
+    True(!state.Bind(player, "https://leaderboard.example"));
+    Equal(2, state.Pending.Count);
+    True(!state.RemoveHead(second));
+    True(state.RemoveHead(first));
+    Equal(second, state.Pending[0].MatchId);
+
+    while (state.Pending.Count < LeaderboardOutboxState.MaximumPending)
+    {
+        Equal(LeaderboardEnqueueResult.Added, state.Enqueue(Guid.NewGuid(), now));
+    }
+    Equal(LeaderboardEnqueueResult.Full, state.Enqueue(Guid.NewGuid(), now));
+    Equal(second, state.Pending[0].MatchId);
+
+    True(state.Bind(Guid.NewGuid(), "https://leaderboard.example"));
+    Equal(0, state.Pending.Count);
+    True(state.Bind(null, "https://leaderboard.example"));
+    True(!state.PlayerId.HasValue);
+    Equal(string.Empty, state.ServerBaseUrl);
+}
+
+static void LeaderboardRetryBackoff()
+{
+    Equal(TimeSpan.FromSeconds(5), LeaderboardRetryPolicy.DelayAfterFailure(1));
+    Equal(TimeSpan.FromSeconds(10), LeaderboardRetryPolicy.DelayAfterFailure(2));
+    Equal(TimeSpan.FromSeconds(160), LeaderboardRetryPolicy.DelayAfterFailure(6));
+    Equal(LeaderboardRetryPolicy.MaximumDelay, LeaderboardRetryPolicy.DelayAfterFailure(7));
+    Equal(LeaderboardRetryPolicy.MaximumDelay, LeaderboardRetryPolicy.DelayAfterFailure(30));
+
+    True(LeaderboardRetryPolicy.IsRetryable(null));
+    True(LeaderboardRetryPolicy.IsRetryable(HttpStatusCode.RequestTimeout));
+    True(LeaderboardRetryPolicy.IsRetryable(HttpStatusCode.TooManyRequests));
+    True(LeaderboardRetryPolicy.IsRetryable(HttpStatusCode.InternalServerError));
+    True(!LeaderboardRetryPolicy.IsRetryable(HttpStatusCode.BadRequest));
+    True(!LeaderboardRetryPolicy.IsRetryable(HttpStatusCode.Unauthorized));
+    True(!LeaderboardRetryPolicy.IsRetryable(HttpStatusCode.Conflict));
+}
+
+static void LeaderboardOutboxPersistence()
+{
+    var now = new DateTime(2026, 7, 15, 13, 0, 0, DateTimeKind.Utc);
+    var state = new LeaderboardOutboxState();
+    var player = Guid.NewGuid();
+    var match = Guid.NewGuid();
+    state.Bind(player, "https://leaderboard.example");
+    state.Enqueue(match, now);
+    state.Pending[0].AttemptCount = 4;
+    state.Pending[0].NextAttemptUtc = now.AddSeconds(40);
+
+    var json = JsonSerializer.Serialize(state, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    var restored = JsonSerializer.Deserialize<LeaderboardOutboxState>(json, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+        ?? throw new InvalidOperationException("Leaderboard outbox JSON round-trip returned null.");
+    True(!restored.Normalize(now));
+    Equal(player, restored.PlayerId!.Value);
+    Equal(1, restored.Pending.Count);
+    Equal(match, restored.Pending[0].MatchId);
+    Equal(4, restored.Pending[0].AttemptCount);
+    Equal(now.AddSeconds(40), restored.Pending[0].NextAttemptUtc);
 }
 
 static void Equal<T>(T expected, T actual) where T : notnull

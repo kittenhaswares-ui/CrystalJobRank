@@ -36,6 +36,14 @@ internal sealed class MatchStore
         }
     }
 
+    public MatchSubmission? FindSubmission(Guid matchId)
+    {
+        lock (gate)
+        {
+            return data.Matches.FirstOrDefault(match => match.Id == matchId)?.ToSubmission();
+        }
+    }
+
     public IReadOnlyList<RatingState> Ratings()
     {
         lock (gate)

@@ -12,4 +12,10 @@ server-data.json
 server-data.json.tmp
 .research/
 artifacts/
-
+node_modules/
+.pnpm-store/
+.wrangler/
+.dev.vars
+.env
+.env.*
+.secrets.*

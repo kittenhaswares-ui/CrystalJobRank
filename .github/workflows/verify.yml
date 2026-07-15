@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   core-and-server:
     runs-on: ubuntu-latest
@@ -19,3 +22,27 @@ jobs:
       - name: Run rating checks
         run: dotnet run --project tests/CrystalJobRank.Core.SelfTest -c Release
 
+  worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/CrystalJobRank.Worker
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: src/CrystalJobRank.Worker/package.json
+      - name: Install Worker dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify generated Worker bindings
+        run: pnpm exec wrangler types --check --include-runtime false
+      - name: Type-check Worker
+        run: pnpm check
+      - name: Test Worker and D1 integration
+        run: pnpm test
+      - name: Verify Worker deployment bundle
+        run: pnpm exec wrangler deploy --dry-run
