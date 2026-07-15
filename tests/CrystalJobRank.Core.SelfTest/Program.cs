@@ -13,7 +13,16 @@ var tests = new (string Name, Action Run)[]
     ("casual and ranked queues affect rating", MatchmadeQueuesAreRated),
     ("rating epochs ignore prior outcomes", EpochReset),
     ("job reset epochs are isolated and repeat-safe", ResetEpochManagement),
-    ("v1 history migrates and reset survives JSON reload", PluginDataMigrationAndResetRoundTrip),
+    ("v2 update resets every local rating exactly once", OneTimeV3RatingReset),
+    ("v1 history migrates in stages and remains idempotent", V1MigrationRoundTrip),
+    ("v2 visible rating peak survives rule recalculation", StoredPeakSurvivesRuleMigration),
+    ("fresh v3 data is never reset", FreshV3DoesNotReset),
+    ("v3 migration normalizes null collections without a reset", NullCollectionsAreNormalized),
+    ("future plugin schema is rejected before mutation", FutureSchemaRejected),
+    ("every combat job maps to exactly one role", CombatRoleMapping),
+    ("lifetime job records preserve peaks and local bests", LifetimeRecords),
+    ("role streaks are queue-aware and role-isolated", RoleStreakAchievements),
+    ("scoreboard validation rejects implausible local stats", ScoreboardStatsValidation),
     ("official job abbreviations parse safely", OfficialJobAbbreviations),
     ("invalid match outcomes are rejected", InvalidOutcomeRejected),
     ("rating caps and movement directions are safe", RatingCaps),
@@ -139,7 +148,60 @@ static void ResetEpochManagement()
     Equal(1, RatingEpochs.Current(epochs, CombatJob.PLD));
 }
 
-static void PluginDataMigrationAndResetRoundTrip()
+static void OneTimeV3RatingReset()
+{
+    var start = new DateTime(2026, 7, 14, 12, 0, 0, DateTimeKind.Utc);
+    var data = new PluginData
+    {
+        Version = 2,
+        RatingRulesVersion = RatingEngine.RulesVersion,
+        CurrentRatingEpochs = new Dictionary<CombatJob, int>
+        {
+            [CombatJob.DRK] = 1,
+            [CombatJob.PLD] = 2,
+        },
+        LifetimeByJob = new Dictionary<CombatJob, JobLifetimeStats>
+        {
+            [CombatJob.DRK] = new() { HighestRating = 2100 },
+        },
+        Matches =
+        [
+            NewMatch(CombatJob.DRK, MatchOutcome.Win, MatchQueue.Casual, start, epoch: 0),
+            // Deliberately ahead of CurrentRatingEpochs to prove the update
+            // always starts strictly after every historical rated epoch.
+            NewMatch(CombatJob.DRK, MatchOutcome.Win, MatchQueue.Ranked, start.AddMinutes(1), epoch: 2),
+            NewMatch(CombatJob.SGE, MatchOutcome.Loss, MatchQueue.Ranked, start.AddMinutes(2), epoch: 0),
+            NewMatch(CombatJob.PLD, MatchOutcome.Win, MatchQueue.Custom, start.AddMinutes(3), epoch: 2),
+        ],
+    };
+    var ids = data.Matches.Select(x => x.Id).ToArray();
+    var matchEpochs = data.Matches.Select(x => x.RatingEpoch).ToArray();
+
+    True(PluginDataMigrations.Apply(data));
+    Equal(PluginDataMigrations.CurrentSchemaVersion, data.Version);
+    Equal(RatingEngine.RulesVersion, data.RatingRulesVersion);
+    Equal(4, data.Matches.Count);
+    True(ids.SequenceEqual(data.Matches.Select(x => x.Id)));
+    True(matchEpochs.SequenceEqual(data.Matches.Select(x => x.RatingEpoch)));
+    Equal(3, RatingEpochs.Current(data.CurrentRatingEpochs, CombatJob.DRK));
+    Equal(3, RatingEpochs.Current(data.CurrentRatingEpochs, CombatJob.PLD));
+    Equal(1, RatingEpochs.Current(data.CurrentRatingEpochs, CombatJob.SGE));
+    Equal(1, RatingEpochs.Current(data.CurrentRatingEpochs, CombatJob.PCT));
+    Equal(CombatJobs.All.Count, data.CurrentRatingEpochs.Count);
+    Equal(2100, data.LifetimeByJob[CombatJob.DRK].HighestRating);
+
+    var currentDrk = RatingEngine.ReplayEpoch(
+        CombatJob.DRK,
+        RatingEpochs.Current(data.CurrentRatingEpochs, CombatJob.DRK),
+        data.Matches.Select(ToEvent));
+    Equal(RatingEngine.InitialRating, currentDrk.Rating);
+    Equal(0, currentDrk.Matches);
+
+    True(!PluginDataMigrations.Apply(data));
+    Equal(3, RatingEpochs.Current(data.CurrentRatingEpochs, CombatJob.DRK));
+}
+
+static void V1MigrationRoundTrip()
 {
     var start = new DateTime(2026, 7, 14, 12, 0, 0, DateTimeKind.Utc);
     var data = new PluginData
@@ -148,9 +210,9 @@ static void PluginDataMigrationAndResetRoundTrip()
         RatingRulesVersion = 0,
         Matches =
         [
-            NewMatch(CombatJob.DRK, MatchOutcome.Win, MatchQueue.Casual, start),
-            NewMatch(CombatJob.DRK, MatchOutcome.Loss, MatchQueue.Ranked, start.AddMinutes(1)),
-            NewMatch(CombatJob.SGE, MatchOutcome.Win, MatchQueue.Ranked, start.AddMinutes(2)),
+            NewMatch(CombatJob.DRK, MatchOutcome.Win, MatchQueue.Casual, start, epoch: 7),
+            NewMatch(CombatJob.DRK, MatchOutcome.Loss, MatchQueue.Ranked, start.AddMinutes(1), epoch: 7),
+            NewMatch(CombatJob.SGE, MatchOutcome.Win, MatchQueue.Ranked, start.AddMinutes(2), epoch: 9),
         ],
     };
 
@@ -158,41 +220,230 @@ static void PluginDataMigrationAndResetRoundTrip()
     Equal(PluginDataMigrations.CurrentSchemaVersion, data.Version);
     Equal(RatingEngine.RulesVersion, data.RatingRulesVersion);
     Equal(3, data.Matches.Count);
+    True(data.Matches.All(x => x.RatingEpoch == 0));
     Equal(32, data.Matches[0].RatingDelta);
     Equal(1532, data.Matches[1].RatingBefore);
     Equal(1499, data.Matches[1].RatingAfter);
     Equal(1532, data.Matches[2].RatingAfter);
-
-    var events = data.Matches.Select(ToEvent).ToArray();
-    True(RatingEpochs.TryReset(data.CurrentRatingEpochs, events, CombatJob.DRK));
-    var firstAfterReset = NewMatch(CombatJob.DRK, MatchOutcome.Win, MatchQueue.Ranked, start.AddMinutes(3));
-    firstAfterReset.RatingEpoch = RatingEpochs.Current(data.CurrentRatingEpochs, CombatJob.DRK);
-    data.Matches.Add(firstAfterReset);
-    PluginDataMigrations.RecalculateMatchRatings(data.Matches);
-    Equal(4, data.Matches.Count);
-    Equal(1500, firstAfterReset.RatingBefore);
-    Equal(1532, firstAfterReset.RatingAfter);
+    Equal(1, RatingEpochs.Current(data.CurrentRatingEpochs, CombatJob.DRK));
+    Equal(1, RatingEpochs.Current(data.CurrentRatingEpochs, CombatJob.SGE));
+    Equal(1532, data.LifetimeByJob[CombatJob.DRK].HighestRating);
 
     var json = JsonSerializer.Serialize(data, new JsonSerializerOptions(JsonSerializerDefaults.Web));
     var reloaded = JsonSerializer.Deserialize<PluginData>(json, new JsonSerializerOptions(JsonSerializerDefaults.Web))
         ?? throw new InvalidOperationException("PluginData JSON round-trip returned null.");
     Equal(1, RatingEpochs.Current(reloaded.CurrentRatingEpochs, CombatJob.DRK));
-    Equal(4, reloaded.Matches.Count);
+    Equal(3, reloaded.Matches.Count);
     True(!PluginDataMigrations.Apply(reloaded));
+    Equal(1, RatingEpochs.Current(reloaded.CurrentRatingEpochs, CombatJob.DRK));
+}
 
-    var reloadedDrk = RatingEngine.ReplayEpoch(
+static void StoredPeakSurvivesRuleMigration()
+{
+    var start = new DateTime(2026, 7, 14, 12, 30, 0, DateTimeKind.Utc);
+    var casualLoss = NewMatch(CombatJob.DRK, MatchOutcome.Loss, MatchQueue.Casual, start);
+    casualLoss.RatingBefore = 1500;
+    casualLoss.RatingAfter = 1500;
+    var rankedWin = NewMatch(CombatJob.DRK, MatchOutcome.Win, MatchQueue.Ranked, start.AddMinutes(1));
+    rankedWin.RatingBefore = 1500;
+    rankedWin.RatingAfter = 1532;
+    var data = new PluginData
+    {
+        Version = 2,
+        RatingRulesVersion = 2,
+        Matches = [casualLoss, rankedWin],
+    };
+
+    True(PluginDataMigrations.Apply(data));
+    Equal(1468, casualLoss.RatingAfter);
+    Equal(1468, rankedWin.RatingBefore);
+    Equal(1501, rankedWin.RatingAfter);
+    Equal(1532, data.LifetimeByJob[CombatJob.DRK].HighestRating);
+    True(!PluginDataMigrations.Apply(data));
+}
+
+static void FreshV3DoesNotReset()
+{
+    var data = new PluginData
+    {
+        Version = 3,
+        CurrentRatingEpochs = new Dictionary<CombatJob, int> { [CombatJob.DRK] = 4 },
+        Matches =
+        [
+            NewMatch(CombatJob.DRK, MatchOutcome.Win, MatchQueue.Ranked, DateTime.UtcNow, epoch: 4),
+        ],
+    };
+    PluginDataMigrations.RecalculateMatchRatings(data.Matches);
+
+    True(PluginDataMigrations.Apply(data));
+    Equal(4, RatingEpochs.Current(data.CurrentRatingEpochs, CombatJob.DRK));
+    True(!PluginDataMigrations.Apply(data));
+    Equal(4, RatingEpochs.Current(data.CurrentRatingEpochs, CombatJob.DRK));
+}
+
+static void NullCollectionsAreNormalized()
+{
+    var data = new PluginData
+    {
+        Version = 3,
+        Matches = null!,
+        CurrentRatingEpochs = null!,
+        LifetimeByJob = null!,
+        RoleStreaks = null!,
+    };
+
+    True(PluginDataMigrations.Apply(data));
+    Equal(0, data.Matches.Count);
+    Equal(0, data.CurrentRatingEpochs.Count);
+    Equal(0, data.LifetimeByJob.Count);
+    Equal(0, data.RoleStreaks.Count);
+    True(!PluginDataMigrations.Apply(data));
+}
+
+static void FutureSchemaRejected()
+{
+    var data = new PluginData
+    {
+        Version = 4,
+        Matches = null!,
+        CurrentRatingEpochs = null!,
+        LifetimeByJob = null!,
+        RoleStreaks = null!,
+    };
+    var threw = false;
+    try
+    {
+        PluginDataMigrations.Apply(data);
+    }
+    catch (InvalidOperationException)
+    {
+        threw = true;
+    }
+
+    True(threw);
+    True(data.Matches is null);
+    True(data.CurrentRatingEpochs is null);
+    True(data.LifetimeByJob is null);
+    True(data.RoleStreaks is null);
+}
+
+static void CombatRoleMapping()
+{
+    var groups = CombatJobs.All.GroupBy(CombatJobs.RoleOf).ToDictionary(x => x.Key, x => x.Count());
+    Equal(4, groups[CombatRole.Tank]);
+    Equal(4, groups[CombatRole.Healer]);
+    Equal(13, groups[CombatRole.Dps]);
+    Equal(CombatRole.Unknown, CombatJobs.RoleOf(CombatJob.Unknown));
+    Equal(CombatRole.Unknown, CombatJobs.RoleOf((CombatJob)999));
+    Equal(CombatJobs.All.Count, groups.Values.Sum());
+}
+
+static void LifetimeRecords()
+{
+    var start = new DateTime(2026, 7, 14, 13, 0, 0, DateTimeKind.Utc);
+    var first = NewMatch(
         CombatJob.DRK,
-        RatingEpochs.Current(reloaded.CurrentRatingEpochs, CombatJob.DRK),
-        reloaded.Matches.OrderBy(x => x.CompletedAtUtc).Select(ToEvent));
-    Equal(1, reloadedDrk.Matches);
-    Equal(1532, reloadedDrk.Rating);
+        MatchOutcome.Win,
+        MatchQueue.Ranked,
+        start,
+        new ScoreboardStats(4, 1, 3, 500_000, 420_000, 8_000, 60));
+    first.RatingBefore = 1900;
+    first.RatingAfter = 1932;
+    var second = NewMatch(
+        CombatJob.DRK,
+        MatchOutcome.Loss,
+        MatchQueue.Casual,
+        start.AddMinutes(1),
+        new ScoreboardStats(7, 2, 4, 610_000, 700_000, 12_000, 70));
+    second.RatingBefore = 2050;
+    second.RatingAfter = 2017;
+    var custom = NewMatch(
+        CombatJob.DRK,
+        MatchOutcome.Win,
+        MatchQueue.Custom,
+        start.AddMinutes(2),
+        new ScoreboardStats(9, 0, 5, 800_000, 650_000, 30_000, 80));
+    var invalid = NewMatch(
+        CombatJob.DRK,
+        MatchOutcome.Win,
+        MatchQueue.Ranked,
+        start.AddMinutes(3),
+        new ScoreboardStats(1000, 0, 0, 99_000_000, 0, 0, 0));
+    invalid.RatingBefore = 1800;
+    invalid.RatingAfter = 1832;
+
+    var rebuilt = LifetimeProgressCalculator.Rebuild([first, second, custom, invalid]);
+    var stats = rebuilt.LifetimeByJob[CombatJob.DRK];
+    Equal(2050, stats.HighestRating);
+    Equal(9, stats.HighestKills);
+    Equal(800_000, stats.HighestDamageDealt);
+    Equal(700_000, stats.HighestDamageTaken);
+    Equal(30_000, stats.HighestHealing);
+
+    var merged = LifetimeProgressCalculator.MergeLifetime(
+        new Dictionary<CombatJob, JobLifetimeStats>
+        {
+            [CombatJob.DRK] = new() { HighestRating = 2200, HighestKills = 8 },
+        },
+        rebuilt.LifetimeByJob);
+    Equal(2200, merged[CombatJob.DRK].HighestRating);
+    Equal(9, merged[CombatJob.DRK].HighestKills);
+}
+
+static void RoleStreakAchievements()
+{
+    var start = new DateTime(2026, 7, 14, 14, 0, 0, DateTimeKind.Utc);
+    var matches = new[]
+    {
+        NewMatch(CombatJob.DRK, MatchOutcome.Win, MatchQueue.Casual, start, Stats(deaths: 0)),
+        NewMatch(CombatJob.BLM, MatchOutcome.Win, MatchQueue.Ranked, start.AddMinutes(1), Stats(deaths: 1)),
+        NewMatch(CombatJob.PLD, MatchOutcome.Win, MatchQueue.Ranked, start.AddMinutes(2), Stats(deaths: 0)),
+        NewMatch(CombatJob.DRK, MatchOutcome.Loss, MatchQueue.Custom, start.AddMinutes(3), Stats(deaths: 5)),
+        NewMatch(CombatJob.DRK, MatchOutcome.Win, MatchQueue.Ranked, start.AddMinutes(4), Stats(deaths: 0)),
+        NewMatch(CombatJob.SGE, MatchOutcome.Loss, MatchQueue.Casual, start.AddMinutes(5), Stats(deaths: 0)),
+        NewMatch(CombatJob.WAR, MatchOutcome.Loss, MatchQueue.Ranked, start.AddMinutes(6), Stats(deaths: 0)),
+        NewMatch(CombatJob.GNB, MatchOutcome.Win, MatchQueue.Unknown, start.AddMinutes(7), Stats(deaths: 0)),
+        NewMatch(CombatJob.PLD, MatchOutcome.Win, MatchQueue.Ranked, start.AddMinutes(8), Stats(deaths: 2)),
+    };
+
+    var progress = LifetimeProgressCalculator.Rebuild(matches).RoleStreaks;
+    var tank = progress[CombatRole.Tank];
+    Equal(1, tank.CurrentWinStreak);
+    Equal(3, tank.BestWinStreak);
+    Equal(0, tank.CurrentDeathlessStreak);
+    Equal(4, tank.BestDeathlessStreak);
+    Equal(1, progress[CombatRole.Dps].CurrentWinStreak);
+    Equal(0, progress[CombatRole.Dps].CurrentDeathlessStreak);
+    Equal(0, progress[CombatRole.Healer].CurrentWinStreak);
+    Equal(1, progress[CombatRole.Healer].BestDeathlessStreak);
+    True(AchievementThresholds.WinStreak.SequenceEqual([3, 5, 10, 20]));
+    True(AchievementThresholds.DeathlessStreak.SequenceEqual([1, 3, 5, 10, 20]));
+}
+
+static void ScoreboardStatsValidation()
+{
+    Validation.ValidateScoreboardStats(new ScoreboardStats(100, 100, 100, 20_000_000, 20_000_000, 20_000_000, 1800));
+
+    var threw = false;
+    try
+    {
+        Validation.ValidateScoreboardStats(new ScoreboardStats(-1, 0, 0, 0, 0, 0, 0));
+    }
+    catch (ArgumentException)
+    {
+        threw = true;
+    }
+    True(threw);
+    True(!Validation.AreScoreboardStatsPlausible(new ScoreboardStats(0, 0, 0, 20_000_001, 0, 0, 0)));
 }
 
 static MatchRecord NewMatch(
     CombatJob job,
     MatchOutcome outcome,
     MatchQueue queue,
-    DateTime completedAtUtc) => new()
+    DateTime completedAtUtc,
+    ScoreboardStats? stats = null,
+    int epoch = 0) => new()
     {
         Id = Guid.NewGuid(),
         CompletedAtUtc = completedAtUtc,
@@ -200,7 +451,11 @@ static MatchRecord NewMatch(
         Outcome = outcome,
         Queue = queue,
         DurationSeconds = 60,
+        RatingEpoch = epoch,
+        LocalStats = stats ?? Stats(),
     };
+
+static ScoreboardStats Stats(int deaths = 0) => new(0, deaths, 0, 0, 0, 0, 0);
 
 static RatingEvent ToEvent(MatchRecord match) => new(
     match.LocalJob,

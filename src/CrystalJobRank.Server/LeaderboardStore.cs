@@ -7,6 +7,8 @@ namespace CrystalJobRank.Server;
 
 public sealed class LeaderboardStore
 {
+    private const int CurrentSchemaVersion = 3;
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
@@ -23,12 +25,23 @@ public sealed class LeaderboardStore
         filePath = configuration["Leaderboard:DataPath"]
             ?? Path.Combine(environment.ContentRootPath, "server-data.json");
         data = Load();
-        if (data.Version < 2 || data.RatingRulesVersion != RatingEngine.RulesVersion)
+        var changed = false;
+        if (data.Version < CurrentSchemaVersion)
         {
-            data.Version = 2;
-            data.RatingRulesVersion = RatingEngine.RulesVersion;
-            SaveLocked();
+            // Version 3 begins a one-time fresh community season while preserving
+            // prior submissions as season-zero history.
+            data.CurrentSeason = 1;
+            data.Version = CurrentSchemaVersion;
+            changed = true;
         }
+
+        if (data.RatingRulesVersion != RatingEngine.RulesVersion)
+        {
+            data.RatingRulesVersion = RatingEngine.RulesVersion;
+            changed = true;
+        }
+
+        if (changed) SaveLocked();
     }
 
     public RegistrationResponse Register(string requestedDisplayName)
@@ -78,6 +91,7 @@ public sealed class LeaderboardStore
                 Id = Guid.NewGuid(),
                 PlayerId = player.Id,
                 ReceivedAtUtc = DateTime.UtcNow,
+                Season = data.CurrentSeason,
                 Submission = submission,
             };
             data.Matches.Add(stored);
@@ -136,7 +150,7 @@ public sealed class LeaderboardStore
     private RatingState RatingForLocked(Guid playerId, CombatJob job) => RatingEngine.Replay(
         job,
         data.Matches
-            .Where(x => x.PlayerId == playerId && x.Submission.Job == job)
+            .Where(x => x.Season == data.CurrentSeason && x.PlayerId == playerId && x.Submission.Job == job)
             .Where(x => RatingEngine.IsRatedQueue(x.Submission.Queue))
             .OrderBy(x => x.Submission.CompletedAtUtc)
             .ThenBy(x => x.Submission.Fingerprint, StringComparer.Ordinal)
@@ -162,10 +176,18 @@ public sealed class LeaderboardStore
         try
         {
             var loaded = JsonSerializer.Deserialize<ServerData>(File.ReadAllText(filePath), JsonOptions) ?? new ServerData();
-            if (loaded.Version > 2)
+            if (loaded.Version > CurrentSchemaVersion)
             {
                 throw new InvalidOperationException(
-                    $"Leaderboard schema {loaded.Version} is newer than supported schema 2.");
+                    $"Leaderboard schema {loaded.Version} is newer than supported schema {CurrentSchemaVersion}.");
+            }
+            if (loaded.Players is null || loaded.Matches is null || loaded.Matches.Any(x => x is null || x.Submission is null))
+            {
+                throw new InvalidOperationException("Leaderboard data contains missing required collections or matches.");
+            }
+            if (loaded.Version >= CurrentSchemaVersion && loaded.CurrentSeason < 1)
+            {
+                throw new InvalidOperationException("Leaderboard current season must be at least 1.");
             }
             return loaded;
         }
@@ -194,8 +216,9 @@ public sealed class DuplicateMatchException(string message) : Exception(message)
 
 public sealed class ServerData
 {
-    public int Version { get; set; } = 2;
+    public int Version { get; set; } = 3;
     public int RatingRulesVersion { get; set; } = RatingEngine.RulesVersion;
+    public int CurrentSeason { get; set; } = 1;
     public List<PlayerAccount> Players { get; set; } = [];
     public List<StoredMatch> Matches { get; set; } = [];
 }
@@ -213,5 +236,6 @@ public sealed class StoredMatch
     public Guid Id { get; set; }
     public Guid PlayerId { get; set; }
     public DateTime ReceivedAtUtc { get; set; }
+    public int Season { get; set; }
     public MatchSubmission Submission { get; set; } = null!;
 }

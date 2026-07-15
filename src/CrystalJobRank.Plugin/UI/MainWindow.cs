@@ -5,6 +5,7 @@ using CrystalJobRank.Plugin.Services;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Windowing;
+using Dalamud.Plugin.Services;
 
 namespace CrystalJobRank.Plugin.UI;
 
@@ -13,6 +14,7 @@ internal sealed class MainWindow : Window
     private readonly PluginConfiguration configuration;
     private readonly MatchStore matchStore;
     private readonly LeaderboardClient leaderboardClient;
+    private readonly ITextureProvider textureProvider;
     private readonly Action saveConfiguration;
     private readonly object stateGate = new();
 
@@ -28,12 +30,14 @@ internal sealed class MainWindow : Window
         PluginConfiguration configuration,
         MatchStore matchStore,
         LeaderboardClient leaderboardClient,
+        ITextureProvider textureProvider,
         Action saveConfiguration)
         : base("Crystal Job Rank###CrystalJobRankMain")
     {
         this.configuration = configuration;
         this.matchStore = matchStore;
         this.leaderboardClient = leaderboardClient;
+        this.textureProvider = textureProvider;
         this.saveConfiguration = saveConfiguration;
 
         Size = new Vector2(920, 680);
@@ -76,6 +80,10 @@ internal sealed class MainWindow : Window
             currentStatus);
         ImGui.Separator();
 
+        AchievementVisuals.DrawHeader(matchStore.RoleStreakSnapshot());
+        ImGui.Spacing();
+        ImGui.Separator();
+
         if (!ImGui.BeginTabBar("##cjr-tabs")) return;
 
         if (ImGui.BeginTabItem("Job ratings"))
@@ -102,6 +110,7 @@ internal sealed class MainWindow : Window
     private void DrawRatings()
     {
         var ratings = matchStore.Ratings();
+        var lifetime = matchStore.LifetimeSnapshot();
         var currentMatches = ratings.Sum(x => x.Matches);
         var currentWins = ratings.Sum(x => x.Wins);
         var currentLosses = ratings.Sum(x => x.Losses);
@@ -113,7 +122,7 @@ internal sealed class MainWindow : Window
 
         if (ratings.Count == 0)
         {
-            ImGui.TextDisabled("No rated Casual or Ranked matches recorded yet. Finish a matchmade Crystalline Conflict match to create your first job rating.");
+            ImGui.TextDisabled("No job records yet. Finish a Crystalline Conflict match to create your first job card.");
             return;
         }
 
@@ -123,7 +132,12 @@ internal sealed class MainWindow : Window
         {
             if (index % 2 == 0) ImGui.TableNextRow();
             ImGui.TableSetColumnIndex(index % 2);
-            RankVisuals.DrawRatingCard(ratings[index], ImGui.GetContentRegionAvail().X);
+            lifetime.TryGetValue(ratings[index].Job, out var records);
+            RankVisuals.DrawRatingCard(
+                ratings[index],
+                records ?? new JobLifetimeStats(),
+                textureProvider,
+                ImGui.GetContentRegionAvail().X);
             ImGui.Spacing();
         }
 

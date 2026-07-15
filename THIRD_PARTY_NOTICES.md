@@ -1,5 +1,20 @@
 # Third-party notices
 
+## Final Fantasy XIV job icons
+
+Job icon textures are owned by Square Enix. Crystal Job Rank does not copy or
+redistribute them; the plugin requests the icons at runtime from the user's
+installed game files through Dalamud's texture service. The rank frames and
+job-themed ornament drawing code in this repository are original to this
+project.
+
+The non-shipping art-direction board at
+`assets/concepts/job-rank-upgrades.png` was generated with OpenAI image
+generation. It is a visual design reference, not a source of the runtime job
+icons.
+
+## PvP Tracker interoperability research
+
 The Crystalline Conflict result-packet layout and the current match-end hook
 signature were researched and cross-checked against:
 
@@ -35,4 +50,3 @@ The upstream repository publishes the following license notice verbatim:
 > LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
-

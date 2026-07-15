@@ -1,7 +1,9 @@
 using System.Numerics;
 using CrystalJobRank.Core;
+using CrystalJobRank.Plugin.Models;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
+using Dalamud.Plugin.Services;
 
 namespace CrystalJobRank.Plugin.UI;
 
@@ -26,7 +28,7 @@ internal readonly record struct RankBand(
 
 internal static class RankVisuals
 {
-    private static readonly Vector4 CardBackground = new(0.075f, 0.085f, 0.12f, 0.98f);
+    private static readonly Vector4 CardBackground = new(0.05f, 0.06f, 0.095f, 0.98f);
     private static readonly Vector4 CardBorder = new(0.28f, 0.31f, 0.42f, 0.72f);
     private static readonly Vector4 PrimaryText = new(0.94f, 0.95f, 1f, 1f);
     private static readonly Vector4 MutedText = new(0.64f, 0.67f, 0.76f, 1f);
@@ -67,11 +69,15 @@ internal static class RankVisuals
         _ => Rgb(0x9AA2B5),
     };
 
-    public static void DrawRatingCard(RatingState rating, float availableWidth)
+    public static void DrawRatingCard(
+        RatingState rating,
+        JobLifetimeStats lifetime,
+        ITextureProvider textureProvider,
+        float availableWidth)
     {
         var scale = ImGuiHelpers.GlobalScale;
-        var width = MathF.Max(310f * scale, availableWidth - 4f * scale);
-        var height = 138f * scale;
+        var width = MathF.Max(326f * scale, availableWidth - 4f * scale);
+        var height = 207f * scale;
         var origin = ImGui.GetCursorScreenPos();
         var end = origin + new Vector2(width, height);
         var draw = ImGui.GetWindowDrawList();
@@ -79,26 +85,29 @@ internal static class RankVisuals
         var band = GetBand(rating.Rating);
 
         draw.AddRectFilled(origin, end, Pack(CardBackground), 10f * scale);
-        draw.AddRectFilled(
-            origin,
-            new Vector2(origin.X + 6f * scale, end.Y),
-            Pack(jobColor),
-            10f * scale);
+        draw.AddRectFilled(origin, new Vector2(origin.X + 5f * scale, end.Y), Pack(jobColor), 10f * scale);
         draw.AddRect(origin, end, Pack(CardBorder), 10f * scale);
 
-        var badgeCenter = origin + new Vector2(45f, 52f) * scale;
-        DrawRankBadge(draw, badgeCenter, 29f * scale, band);
+        var badgeCenter = origin + new Vector2(48f, 60f) * scale;
+        JobIconVisuals.Draw(textureProvider, draw, badgeCenter, 34f * scale, rating.Job, band);
 
-        var contentX = origin.X + 86f * scale;
-        var titleY = origin.Y + 13f * scale;
+        var role = CombatJobs.RoleOf(rating.Job);
+        var roleText = role == CombatRole.Healer ? "HEALER" : role.ToString().ToUpperInvariant();
+        var roleSize = ImGui.CalcTextSize(roleText);
+        draw.AddText(
+            new Vector2(badgeCenter.X - roleSize.X / 2f, origin.Y + 101f * scale),
+            Pack(WithAlpha(jobColor, 0.86f)),
+            roleText);
+
+        var contentX = origin.X + 96f * scale;
+        var titleY = origin.Y + 12f * scale;
         draw.AddText(new Vector2(contentX, titleY), Pack(jobColor), rating.Job.ToString());
         draw.AddText(new Vector2(contentX + 39f * scale, titleY), Pack(MutedText), JobName(rating.Job));
 
-        var ratingText = $"{rating.Rating:N0}";
-        draw.AddText(new Vector2(contentX, origin.Y + 36f * scale), Pack(PrimaryText), ratingText);
+        draw.AddText(new Vector2(contentX, origin.Y + 36f * scale), Pack(PrimaryText), $"{rating.Rating:N0}");
         draw.AddText(new Vector2(contentX + 55f * scale, origin.Y + 36f * scale), Pack(band.MetalColor), band.Name.ToUpperInvariant());
 
-        var barStart = new Vector2(contentX, origin.Y + 65f * scale);
+        var barStart = new Vector2(contentX, origin.Y + 64f * scale);
         var barEnd = new Vector2(end.X - 14f * scale, barStart.Y + 17f * scale);
         DrawProgressBar(draw, barStart, barEnd, rating.Rating, band, jobColor, scale);
 
@@ -110,17 +119,50 @@ internal static class RankVisuals
         var provisional = rating.Matches < RatingEngine.ProvisionalMatches
             ? $"  •  provisional {rating.Matches}/{RatingEngine.ProvisionalMatches}"
             : string.Empty;
-        var stats = $"{rating.Wins}W  {rating.Losses}L  •  {rating.WinRate:P0}{provisional}";
-        draw.AddText(new Vector2(contentX, origin.Y + 111f * scale), Pack(PrimaryText), stats);
+        draw.AddText(
+            new Vector2(contentX, origin.Y + 111f * scale),
+            Pack(PrimaryText),
+            $"{rating.Wins}W  {rating.Losses}L  •  {rating.WinRate:P0}{provisional}");
+
+        var dividerY = origin.Y + 139f * scale;
+        draw.AddLine(
+            new Vector2(origin.X + 13f * scale, dividerY),
+            new Vector2(end.X - 13f * scale, dividerY),
+            Pack(WithAlpha(CardBorder, 0.68f)),
+            scale);
+
+        var peakBand = GetBand(lifetime.HighestRating);
+        draw.AddText(
+            new Vector2(origin.X + 14f * scale, origin.Y + 149f * scale),
+            Pack(MutedText),
+            "ALL-TIME PEAK");
+        draw.AddText(
+            new Vector2(origin.X + 116f * scale, origin.Y + 149f * scale),
+            Pack(peakBand.MetalColor),
+            $"{lifetime.HighestRating:N0}  {peakBand.Name.ToUpperInvariant()}");
+
+        draw.AddText(
+            new Vector2(origin.X + 14f * scale, origin.Y + 171f * scale),
+            Pack(PrimaryText),
+            $"KOs {lifetime.HighestKills:N0}  •  Dealt {Compact(lifetime.HighestDamageDealt)}");
+        draw.AddText(
+            new Vector2(origin.X + 14f * scale, origin.Y + 190f * scale),
+            Pack(PrimaryText),
+            $"Taken {Compact(lifetime.HighestDamageTaken)}  •  Healing {Compact(lifetime.HighestHealing)}");
 
         ImGui.Dummy(new Vector2(width, height));
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(
                 $"{rating.Job} {band.Name}\n" +
-                $"{rating.Rating:N0} rating\n" +
+                $"Current rating: {rating.Rating:N0}\n" +
+                $"All-time highest rating: {lifetime.HighestRating:N0} ({peakBand.Name})\n" +
                 $"{rating.Matches} Casual + Ranked matches • {rating.WinRate:P1} observed win rate\n" +
-                $"{RatingEngine.EstimatedWinProbability(rating.Rating):P1} estimated win probability vs reference");
+                $"Highest KOs: {lifetime.HighestKills:N0}\n" +
+                $"Highest damage dealt: {lifetime.HighestDamageDealt:N0}\n" +
+                $"Highest damage taken: {lifetime.HighestDamageTaken:N0}\n" +
+                $"Highest healing done: {lifetime.HighestHealing:N0}\n\n" +
+                "Scoreboard records include every locally recorded CC match.");
         }
     }
 
@@ -162,130 +204,12 @@ internal static class RankVisuals
         }
     }
 
-    private static void DrawRankBadge(ImDrawListPtr draw, Vector2 center, float radius, RankBand band)
+    private static string Compact(int value) => value switch
     {
-        var scale = radius / 29f;
-        var metal = band.MetalColor;
-        var shadow = Rgb(0x171A24);
-
-        if (band.OrnamentLevel >= 5)
-        {
-            for (var i = 0; i < 8; i++)
-            {
-                var angle = MathF.PI * i / 4f;
-                var inner = center + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * radius;
-                var outer = center + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * radius * 1.28f;
-                draw.AddLine(inner, outer, Pack(WithAlpha(metal, 0.78f)), 3f * scale);
-            }
-        }
-
-        if (band.OrnamentLevel >= 4)
-        {
-            var diamondRadius = radius * 1.12f;
-            var top = center + new Vector2(0, -diamondRadius);
-            var right = center + new Vector2(diamondRadius, 0);
-            var bottom = center + new Vector2(0, diamondRadius);
-            var left = center + new Vector2(-diamondRadius, 0);
-            draw.AddTriangleFilled(top, right, bottom, Pack(WithAlpha(metal, 0.24f)));
-            draw.AddTriangleFilled(top, bottom, left, Pack(WithAlpha(metal, 0.16f)));
-        }
-
-        if (band.OrnamentLevel >= 3)
-        {
-            DrawWing(draw, center, radius, metal, -1f);
-            DrawWing(draw, center, radius, metal, 1f);
-        }
-
-        draw.AddCircleFilled(center + new Vector2(0, 2f * scale), radius, Pack(WithAlpha(shadow, 0.8f)), 40);
-        draw.AddCircleFilled(center, radius, Pack(Rgb(0x24293A)), 40);
-        draw.AddCircle(center, radius, Pack(metal), 40, 2.5f * scale);
-
-        if (band.OrnamentLevel >= 1)
-        {
-            draw.AddCircle(center, radius - 4f * scale, Pack(WithAlpha(metal, 0.5f)), 40, 1.2f * scale);
-        }
-
-        if (band.OrnamentLevel >= 2)
-        {
-            var crownY = center.Y - radius - 2f * scale;
-            draw.AddTriangleFilled(
-                new Vector2(center.X - 10f * scale, crownY + 5f * scale),
-                new Vector2(center.X - 5f * scale, crownY - 3f * scale),
-                new Vector2(center.X, crownY + 5f * scale),
-                Pack(metal));
-            draw.AddTriangleFilled(
-                new Vector2(center.X, crownY + 5f * scale),
-                new Vector2(center.X + 5f * scale, crownY - 3f * scale),
-                new Vector2(center.X + 10f * scale, crownY + 5f * scale),
-                Pack(metal));
-        }
-
-        DrawSword(
-            draw,
-            center + new Vector2(-14f, 17f) * scale,
-            center + new Vector2(14f, -17f) * scale,
-            metal,
-            scale);
-        DrawSword(
-            draw,
-            center + new Vector2(14f, 17f) * scale,
-            center + new Vector2(-14f, -17f) * scale,
-            metal,
-            scale);
-
-        if (band.OrnamentLevel >= 4)
-        {
-            var gem = band.OrnamentLevel >= 5 ? Rgb(0xFFF4FF) : Rgb(0xDDF5FF);
-            var gemCenter = center + new Vector2(0, 13f * scale);
-            draw.AddTriangleFilled(
-                gemCenter + new Vector2(0, -5f * scale),
-                gemCenter + new Vector2(5f * scale, 0),
-                gemCenter + new Vector2(0, 6f * scale),
-                Pack(gem));
-            draw.AddTriangleFilled(
-                gemCenter + new Vector2(0, -5f * scale),
-                gemCenter + new Vector2(0, 6f * scale),
-                gemCenter + new Vector2(-5f * scale, 0),
-                Pack(WithAlpha(gem, 0.72f)));
-        }
-    }
-
-    private static void DrawSword(
-        ImDrawListPtr draw,
-        Vector2 handle,
-        Vector2 tip,
-        Vector4 metal,
-        float scale)
-    {
-        var direction = Vector2.Normalize(tip - handle);
-        var perpendicular = new Vector2(-direction.Y, direction.X);
-        var guardCenter = handle + direction * 7f * scale;
-        var bladeBase = guardCenter + direction * 2f * scale;
-        var tipBase = tip - direction * 7f * scale;
-        var dark = new Vector4(metal.X * 0.42f, metal.Y * 0.42f, metal.Z * 0.42f, 1f);
-
-        draw.AddLine(bladeBase + new Vector2(1.5f, 2f) * scale, tip + new Vector2(1.5f, 2f) * scale, Pack(Rgb(0x10131B)), 7f * scale);
-        draw.AddLine(bladeBase, tipBase, Pack(dark), 6f * scale);
-        draw.AddTriangleFilled(tip, tipBase + perpendicular * 3f * scale, tipBase - perpendicular * 3f * scale, Pack(metal));
-        draw.AddLine(bladeBase + perpendicular * 1.3f * scale, tipBase + perpendicular * 1.3f * scale, Pack(WithAlpha(Vector4.One, 0.48f)), 1.2f * scale);
-
-        draw.AddLine(guardCenter - perpendicular * 7f * scale, guardCenter + perpendicular * 7f * scale, Pack(Rgb(0x11141C)), 5f * scale);
-        draw.AddLine(guardCenter - perpendicular * 7f * scale, guardCenter + perpendicular * 7f * scale, Pack(metal), 2.8f * scale);
-        draw.AddLine(handle, guardCenter, Pack(dark), 4f * scale);
-        draw.AddCircleFilled(handle, 3.2f * scale, Pack(metal), 12);
-    }
-
-    private static void DrawWing(ImDrawListPtr draw, Vector2 center, float radius, Vector4 metal, float direction)
-    {
-        var scale = radius / 29f;
-        var root = center + new Vector2(direction * radius * 0.72f, 4f * scale);
-        for (var i = 0; i < 3; i++)
-        {
-            var inner = root + new Vector2(direction * i * 3f, -i * 4f) * scale;
-            var outer = root + new Vector2(direction * (14f + i * 3f), (-10f + i * 7f)) * scale;
-            draw.AddLine(inner, outer, Pack(WithAlpha(metal, 0.82f)), (4f - i * 0.7f) * scale);
-        }
-    }
+        >= 1_000_000 => $"{value / 1_000_000d:0.##}M",
+        >= 1_000 => $"{value / 1_000d:0.#}K",
+        _ => value.ToString("N0"),
+    };
 
     private static string JobName(CombatJob job) => job switch
     {

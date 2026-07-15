@@ -7,6 +7,11 @@ Crystalline Conflict statistics. It records the result screen, keeps a local
 match history, and calculates a separate community-style rating for every job
 you play.
 
+Version 0.4 adds official in-game job icons with rank-metal colors and
+job-specific ornaments, persistent personal records, and role achievements.
+The update starts every local job at a fresh 1500 rating exactly once. Match
+history, all-time peaks, personal scoreboard records, and badges are retained.
+
 The rating is not Square Enix's hidden matchmaking rating and it is not an
 official competitive ladder. It is a transparent, outcome-only estimate:
 
@@ -17,12 +22,38 @@ official competitive ladder. It is a transparent, outcome-only estimate:
   followed by a steadier established adjustment (`K = 32`);
 - damage, kills, and healing are displayed but never influence rating.
 
+Each job card also keeps its all-time highest rating and highest local kills,
+damage dealt, damage taken, and healing. Scoreboard records include every
+locally recorded CC match; only Casual and Ranked affect rating and streaks.
+
+The header displays two achievement families for Tank, DPS, and Healer. Job
+changes within the same role continue that role's sequence, while playing a
+different role neither advances nor breaks it:
+
+- **Flawless** — finish 1, 3, 5, 10, or 20 eligible matches in a row without dying;
+- **Win Streak** — win 3, 5, 10, or 20 eligible matches in a row.
+
+Custom and Unknown-queue matches do not count and do not interrupt a streak.
+The highest badge remains unlocked after the active streak ends.
+
 The rating screen uses job-colored progress bars and six visual tiers. The
 initial 1500 rating starts at Bronze, followed by Silver at 1600, Gold at
 1700, Platinum at 1800, Diamond at 1900, and Crystal at 2000. Ratings below
 1500 remain Bronze. The colors follow the familiar
 community/FFLogs job palette; Square Enix does not publish an official set of
 job-color hex values.
+
+The center of every rank badge is the official job icon loaded at runtime from
+the player's FFXIV installation. The plugin does not redistribute those game
+textures. Bronze through Crystal tint the icon and add progressively richer
+frames; job motifs include Dark Knight lightning, Bard music notes, Dancer
+feathers, and equivalent ornaments for every supported job.
+
+![Job rank upgrade art-direction board](assets/concepts/job-rank-upgrades.png)
+
+The concept board was generated with OpenAI image generation for art direction.
+The shipping UI deliberately uses Square Enix's real in-game icons rather than
+AI-redrawn substitutes.
 
 The rating is a fixed-reference logistic estimate because FFXIV does not expose
 opponent MMR. At equilibrium, the visible thresholds correspond to roughly
@@ -101,6 +132,11 @@ codes. A reset starts a new local rating epoch at 1500 Bronze while preserving
 the complete match history. It intentionally does not erase the shared
 community leaderboard, where freely deleting losses would undermine the
 ladder.
+
+The 0.4 update also performs one automatic season reset for every job. This is
+schema-migration based and therefore cannot repeat on later launches. A hosted
+copy of the included leaderboard server likewise moves existing submissions to
+historical season 0 and starts season 1 once when upgraded.
 
 ## Distribution caveat
 

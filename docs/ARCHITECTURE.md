@@ -24,6 +24,10 @@ reduce operations work, but they are still a backend service in this design.
 The plugin never uploads other players' names, worlds, content IDs, account IDs,
 or scoreboard rows.
 
+Local aggregation also derives persistent per-job personal records and
+role-specific streak progress from the same ordered match history. These values
+are never part of the leaderboard submission contract.
+
 ## Rating model
 
 This is an Elo-like estimate against a fixed 1500 reference pool:
@@ -58,6 +62,20 @@ The wider logistic scale is calibrated to the visible 100-point divisions:
 | Diamond | 1900 | 61.3% |
 | Crystal | 2000 | 64.0% |
 
+## Lifetime records and achievements
+
+Every job stores a monotonic all-time rating peak with a 1500 floor plus local
+maxima for kills, damage dealt, damage taken, and HP restored. Rating peaks only
+use Casual/Ranked rating events; personal scoreboard maxima may use any locally
+recorded CC queue. Implausible scoreboard values are rejected for new records
+and ignored during history backfill.
+
+Achievements use chronologically ordered Casual/Ranked matches and are isolated
+by role. Tank, DPS, and Healer each track current and best Win Streak and
+Deathless Streak independently. A match played on another role is absent from
+that role's sequence. Custom and Unknown queues neither advance nor break one.
+Deathless milestones are `1/3/5/10/20`; win milestones are `3/5/10/20`.
+
 ## Local rating resets
 
 The plugin stores an integer rating epoch for every played job. Resetting a job
@@ -69,6 +87,22 @@ Local resets never remove community leaderboard results. Allowing users to
 delete only their losing public history would make the shared ladder
 meaningless; public resets should happen only through an administrator-defined
 season transition.
+
+Schema version 3 is the one deliberate exception: upgrading from an older
+plugin version increments every local job epoch exactly once, preserving all
+matches and lifetime progress. Fresh installations start directly at schema 3,
+so the migration cannot run twice. The optional server performs the matching
+one-time transition to season 1; old submissions remain stored as season 0 and
+are excluded from the current leaderboard.
+
+## Job icon rendering
+
+The UI requests official job textures from the local game through Dalamud's
+`ITextureProvider` and the conventional `62000 + ClassJob row ID` icon lookup.
+No Square Enix texture is bundled. The icon is tinted with the current rank
+metal and surrounded by code-rendered job motifs and increasingly elaborate
+rank frames. Missing or not-yet-loaded textures fall back to the job
+abbreviation for that frame.
 
 ## Authentication and abuse
 

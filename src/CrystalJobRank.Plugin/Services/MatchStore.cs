@@ -17,11 +17,14 @@ internal sealed class MatchStore
     private readonly IPluginLog log;
     private PluginData data;
 
+    public bool AppliedOneTimeUpdateReset { get; }
+
     public MatchStore(string configDirectory, IPluginLog log)
     {
         this.log = log;
         filePath = Path.Combine(configDirectory, "matches.json");
         data = Load();
+        AppliedOneTimeUpdateReset = data.Version < PluginDataMigrations.CurrentSchemaVersion;
         if (PluginDataMigrations.Apply(data)) SaveLocked();
     }
 
@@ -43,13 +46,35 @@ internal sealed class MatchStore
                 .Select(ToRatingEvent)
                 .ToArray();
             return data.Matches
-                .Where(x => CombatJobs.All.Contains(x.LocalJob) && RatingEngine.IsRatedQueue(x.Queue))
+                .Where(x => CombatJobs.All.Contains(x.LocalJob))
                 .Select(x => x.LocalJob)
                 .Distinct()
                 .Select(job => RatingEngine.ReplayEpoch(job, CurrentEpochLocked(job), events))
                 .OrderByDescending(x => x.Rating)
                 .ThenByDescending(x => x.Matches)
                 .ToArray();
+        }
+    }
+
+    public IReadOnlyDictionary<CombatJob, JobLifetimeStats> LifetimeSnapshot()
+    {
+        lock (gate)
+        {
+            return data.LifetimeByJob.ToDictionary(pair => pair.Key, pair => pair.Value.Copy());
+        }
+    }
+
+    public IReadOnlyDictionary<CombatRole, RoleStreakProgress> RoleStreakSnapshot()
+    {
+        lock (gate)
+        {
+            var result = data.RoleStreaks.ToDictionary(pair => pair.Key, pair => pair.Value.Copy());
+            foreach (var role in new[] { CombatRole.Tank, CombatRole.Dps, CombatRole.Healer })
+            {
+                result.TryAdd(role, new RoleStreakProgress());
+            }
+
+            return result;
         }
     }
 
@@ -96,10 +121,28 @@ internal sealed class MatchStore
     {
         lock (gate)
         {
+            if (!CombatJobs.All.Contains(record.LocalJob))
+            {
+                throw new ArgumentException("A valid local combat job is required.", nameof(record));
+            }
+            if (!Enum.IsDefined(record.Outcome) || !Enum.IsDefined(record.Queue))
+            {
+                throw new ArgumentException("A valid match outcome and queue are required.", nameof(record));
+            }
+            if (record.DurationSeconds is < 10 or > 1800)
+            {
+                throw new ArgumentException("Match duration is outside the accepted range.", nameof(record));
+            }
+            Validation.ValidateScoreboardStats(record.LocalStats);
+
             var isDuplicate = data.Matches.Any(existing =>
                 existing.LocalJob == record.LocalJob &&
                 existing.Outcome == record.Outcome &&
+                existing.Queue == record.Queue &&
+                existing.TerritoryId == record.TerritoryId &&
                 existing.DurationSeconds == record.DurationSeconds &&
+                existing.AstraProgressTenths == record.AstraProgressTenths &&
+                existing.UmbraProgressTenths == record.UmbraProgressTenths &&
                 existing.LocalStats == record.LocalStats &&
                 Math.Abs((existing.CompletedAtUtc - record.CompletedAtUtc).TotalSeconds) < 20);
 
@@ -110,22 +153,31 @@ internal sealed class MatchStore
             }
 
             record.RatingEpoch = CurrentEpochLocked(record.LocalJob);
-            var state = RatingForCurrentEpochLocked(record.LocalJob);
-            var change = !RatingEngine.IsRatedQueue(record.Queue)
-                ? new RatingChange(state.Rating, state.Rating, 0, state.Matches, state.Wins, state.Losses)
-                : RatingEngine.Apply(state, record.Outcome);
-            record.RatingBefore = change.Before;
-            record.RatingAfter = change.After;
-            record.RatingDelta = change.Delta;
-
+            var previousLifetime = data.LifetimeByJob;
+            var previousStreaks = data.RoleStreaks;
+            var previousRatings = data.Matches
+                .Select(match => (Match: match, match.RatingBefore, match.RatingAfter, match.RatingDelta))
+                .ToArray();
             data.Matches.Add(record);
             try
             {
+                PluginDataMigrations.RecalculateMatchRatings(data.Matches);
+                var rebuilt = LifetimeProgressCalculator.Rebuild(data.Matches);
+                data.LifetimeByJob = LifetimeProgressCalculator.MergeLifetime(previousLifetime, rebuilt.LifetimeByJob);
+                data.RoleStreaks = LifetimeProgressCalculator.MergeStreaks(previousStreaks, rebuilt.RoleStreaks);
                 SaveLocked();
             }
             catch
             {
                 data.Matches.Remove(record);
+                foreach (var previous in previousRatings)
+                {
+                    previous.Match.RatingBefore = previous.RatingBefore;
+                    previous.Match.RatingAfter = previous.RatingAfter;
+                    previous.Match.RatingDelta = previous.RatingDelta;
+                }
+                data.LifetimeByJob = previousLifetime;
+                data.RoleStreaks = previousStreaks;
                 throw;
             }
             return record;
@@ -148,14 +200,6 @@ internal sealed class MatchStore
     }
 
     private int CurrentEpochLocked(CombatJob job) => RatingEpochs.Current(data.CurrentRatingEpochs, job);
-
-    private RatingState RatingForCurrentEpochLocked(CombatJob job) => RatingEngine.ReplayEpoch(
-        job,
-        CurrentEpochLocked(job),
-        data.Matches
-            .OrderBy(x => x.CompletedAtUtc)
-            .ThenBy(x => x.Id)
-            .Select(ToRatingEvent));
 
     private static RatingEvent ToRatingEvent(MatchRecord match) => new(
         match.LocalJob,

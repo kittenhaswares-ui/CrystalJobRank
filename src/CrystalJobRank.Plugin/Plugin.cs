@@ -34,6 +34,7 @@ public sealed class Plugin : IDalamudPlugin
         IPlayerState playerState,
         IObjectTable objectTable,
         IDataManager dataManager,
+        ITextureProvider textureProvider,
         IGameInteropProvider interopProvider,
         IPluginLog log)
     {
@@ -47,7 +48,11 @@ public sealed class Plugin : IDalamudPlugin
 
         matchStore = new MatchStore(pluginInterface.GetPluginConfigDirectory(), log);
         leaderboardClient = new LeaderboardClient();
-        mainWindow = new MainWindow(Configuration, matchStore, leaderboardClient, SaveConfiguration);
+        mainWindow = new MainWindow(Configuration, matchStore, leaderboardClient, textureProvider, SaveConfiguration);
+        if (matchStore.AppliedOneTimeUpdateReset)
+        {
+            mainWindow.SetStatus("New season: all local job ratings reset once to 1500. Match history, records, and badges were kept.");
+        }
         windowSystem.AddWindow(mainWindow);
 
         capture = new CrystallineConflictCapture(

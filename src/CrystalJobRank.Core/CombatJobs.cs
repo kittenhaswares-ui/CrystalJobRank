@@ -24,4 +24,14 @@ public static class CombatJobs
         job = CombatJob.Unknown;
         return false;
     }
+
+    public static CombatRole RoleOf(CombatJob job) => job switch
+    {
+        CombatJob.PLD or CombatJob.WAR or CombatJob.DRK or CombatJob.GNB => CombatRole.Tank,
+        CombatJob.WHM or CombatJob.SCH or CombatJob.AST or CombatJob.SGE => CombatRole.Healer,
+        CombatJob.MNK or CombatJob.DRG or CombatJob.NIN or CombatJob.SAM or CombatJob.RPR or CombatJob.VPR or
+        CombatJob.BRD or CombatJob.MCH or CombatJob.DNC or
+        CombatJob.BLM or CombatJob.SMN or CombatJob.RDM or CombatJob.PCT => CombatRole.Dps,
+        _ => CombatRole.Unknown,
+    };
 }

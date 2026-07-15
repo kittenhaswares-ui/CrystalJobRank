@@ -55,18 +55,24 @@ public static partial class Validation
             throw new ArgumentException("Match duration is outside the accepted range.");
         }
 
-        var stats = submission.Stats;
-        if (stats.Kills is < 0 or > 100 || stats.Deaths is < 0 or > 100 || stats.Assists is < 0 or > 100)
-        {
-            throw new ArgumentException("K/D/A values are outside the accepted range.");
-        }
+        ValidateScoreboardStats(submission.Stats);
+    }
 
-        if (stats.DamageDealt is < 0 or > 20_000_000 ||
-            stats.DamageTaken is < 0 or > 20_000_000 ||
-            stats.HpRestored is < 0 or > 20_000_000 ||
-            stats.TimeOnCrystalSeconds is < 0 or > 1800)
+    public static bool AreScoreboardStatsPlausible(ScoreboardStats? stats) =>
+        stats is not null &&
+        stats.Kills is >= 0 and <= 100 &&
+        stats.Deaths is >= 0 and <= 100 &&
+        stats.Assists is >= 0 and <= 100 &&
+        stats.DamageDealt is >= 0 and <= 20_000_000 &&
+        stats.DamageTaken is >= 0 and <= 20_000_000 &&
+        stats.HpRestored is >= 0 and <= 20_000_000 &&
+        stats.TimeOnCrystalSeconds is >= 0 and <= 1800;
+
+    public static void ValidateScoreboardStats(ScoreboardStats? stats)
+    {
+        if (!AreScoreboardStatsPlausible(stats))
         {
-            throw new ArgumentException("Scoreboard values are outside the accepted range.");
+            throw new ArgumentException("Scoreboard values are outside the accepted range.", nameof(stats));
         }
     }
 }

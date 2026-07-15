@@ -14,6 +14,14 @@ public enum MatchQueue
     Custom = 3,
 }
 
+public enum CombatRole
+{
+    Unknown = 0,
+    Tank = 1,
+    Dps = 2,
+    Healer = 3,
+}
+
 public enum CombatJob
 {
     Unknown = 0,
