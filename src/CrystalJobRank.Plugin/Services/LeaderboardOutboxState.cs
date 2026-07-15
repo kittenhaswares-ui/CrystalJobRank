@@ -18,26 +18,22 @@ internal sealed class LeaderboardOutboxItem
 
 internal sealed class LeaderboardOutboxState
 {
-    public const int CurrentVersion = 1;
+    public const int CurrentVersion = 2;
     public const int MaximumPending = 512;
 
     public int Version { get; set; } = CurrentVersion;
-    public Guid? PlayerId { get; set; }
     public string ServerBaseUrl { get; set; } = string.Empty;
     public List<LeaderboardOutboxItem> Pending { get; set; } = [];
 
-    public bool Bind(Guid? playerId, string serverBaseUrl)
+    public bool Bind(string serverBaseUrl)
     {
-        var normalizedUrl = playerId.HasValue ? NormalizeServerUrl(serverBaseUrl) : string.Empty;
-        if (PlayerId == playerId &&
-            string.Equals(ServerBaseUrl, normalizedUrl, StringComparison.OrdinalIgnoreCase))
+        var normalizedUrl = NormalizeServerUrl(serverBaseUrl);
+        if (string.Equals(ServerBaseUrl, normalizedUrl, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
 
-        PlayerId = playerId;
         ServerBaseUrl = normalizedUrl;
-        Pending.Clear();
         return true;
     }
 
@@ -69,6 +65,7 @@ internal sealed class LeaderboardOutboxState
                 $"Leaderboard outbox version {Version} is newer than the supported version {CurrentVersion}.");
         }
 
+        var upgradedFromRegistrationQueue = Version < 2;
         var changed = Version != CurrentVersion;
         Version = CurrentVersion;
         if (Pending is null)
@@ -113,13 +110,16 @@ internal sealed class LeaderboardOutboxState
             });
         }
 
-        if (!PlayerId.HasValue && normalized.Count > 0)
+        // v1 entries were bound to the retired manual-registration API and do not
+        // contain the per-match character identity required by v2. Clear them once
+        // during the season/rating reset instead of retrying malformed submissions.
+        if (upgradedFromRegistrationQueue && normalized.Count > 0)
         {
             normalized.Clear();
             changed = true;
         }
 
-        var normalizedUrl = PlayerId.HasValue ? NormalizeServerUrl(ServerBaseUrl) : string.Empty;
+        var normalizedUrl = NormalizeServerUrl(ServerBaseUrl);
         if (!string.Equals(ServerBaseUrl, normalizedUrl, StringComparison.Ordinal)) changed = true;
         ServerBaseUrl = normalizedUrl;
         if (changed) Pending = normalized;

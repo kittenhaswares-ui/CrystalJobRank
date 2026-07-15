@@ -17,12 +17,11 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ICommandManager commandManager;
     private readonly IChatGui chatGui;
     private readonly IPluginLog log;
-    private readonly IClientState clientState;
-    private readonly IPlayerState playerState;
     private readonly WindowSystem windowSystem = new("CrystalJobRank");
     private readonly MatchStore matchStore;
     private readonly LeaderboardClient leaderboardClient;
     private readonly LeaderboardOutbox leaderboardOutbox;
+    private readonly SerialWorkQueue<MatchRecord> matchPersistence;
     private readonly CrystallineConflictCapture capture;
     private readonly MainWindow mainWindow;
     private bool disposed;
@@ -37,6 +36,7 @@ public sealed class Plugin : IDalamudPlugin
         IPlayerState playerState,
         IObjectTable objectTable,
         IDataManager dataManager,
+        IFramework framework,
         ITextureProvider textureProvider,
         IGameInteropProvider interopProvider,
         IPluginLog log)
@@ -45,8 +45,6 @@ public sealed class Plugin : IDalamudPlugin
         this.commandManager = commandManager;
         this.chatGui = chatGui;
         this.log = log;
-        this.clientState = clientState;
-        this.playerState = playerState;
 
         Configuration = pluginInterface.GetPluginConfig() as PluginConfiguration ?? new PluginConfiguration();
         Configuration.Initialize(pluginInterface);
@@ -61,31 +59,23 @@ public sealed class Plugin : IDalamudPlugin
             matchStore,
             leaderboardClient,
             leaderboardOutbox,
-            clientState,
-            playerState,
             textureProvider,
             SaveConfiguration);
         leaderboardOutbox.StatusChanged += OnLeaderboardStatusChanged;
-        clientState.Login += OnClientLogin;
-        clientState.Logout += OnClientLogout;
-        UpdateLeaderboardOutboxState();
-        if (Configuration.ClearedLegacyLeaderboardIdentity)
+        leaderboardOutbox.UpdateState(Configuration.ServerBaseUrl, Configuration.InstallationKey);
+        if (matchStore.AppliedOneTimeUpdateReset)
         {
-            mainWindow.SetStatus(
-                "Leaderboard identities now use the logged-in character and Home World. " +
-                "The old alias credentials and pending uploads were removed; register again when ready.");
-        }
-        else if (matchStore.AppliedOneTimeUpdateReset)
-        {
-            mainWindow.SetStatus("New season: all local job ratings reset once to 1500. Match history, records, and badges were kept.");
+            mainWindow.SetStatus("New season: ratings reset once to 1500. Match history, records, and badges were kept; leaderboard sharing is now automatic.");
         }
         windowSystem.AddWindow(mainWindow);
+        matchPersistence = new SerialWorkQueue<MatchRecord>(StoreCapturedMatch, HandleMatchStoreFailure);
 
         capture = new CrystallineConflictCapture(
             clientState,
             playerState,
             objectTable,
             dataManager,
+            framework,
             interopProvider,
             log);
         capture.MatchCaptured += OnMatchCaptured;
@@ -109,8 +99,10 @@ public sealed class Plugin : IDalamudPlugin
         commandManager.RemoveHandler(Command);
         capture.MatchCaptured -= OnMatchCaptured;
         capture.Dispose();
-        clientState.Login -= OnClientLogin;
-        clientState.Logout -= OnClientLogout;
+        // Finish every match that was accepted from the framework before
+        // stopping the outbox. Add() returns only after its atomic file replace,
+        // so a clean unload preserves the existing atomic-write guarantee.
+        matchPersistence.Dispose();
         leaderboardOutbox.StatusChanged -= OnLeaderboardStatusChanged;
         leaderboardOutbox.Dispose();
         leaderboardClient.Dispose();
@@ -170,15 +162,16 @@ public sealed class Plugin : IDalamudPlugin
 
         if (parts[1].Equals("all", StringComparison.OrdinalIgnoreCase))
         {
+            matchPersistence.Drain();
             var resetJobs = matchStore.ResetAllRatings();
             if (resetJobs.Count == 0)
             {
-                Print("No active job ratings to reset.");
+                Print("No active job ratings to reset for the latest captured character.");
                 return;
             }
 
             var jobs = string.Join(", ", resetJobs);
-            var message = $"Reset {resetJobs.Count} local job ratings ({jobs}) to 1500 Bronze. Match history kept. Community leaderboard unchanged.";
+            var message = $"Reset {resetJobs.Count} local job ratings ({jobs}) for the latest captured character to 1500 Bronze. Match history kept. Community leaderboard unchanged.";
             mainWindow.SetStatus(message);
             Print(message);
             log.Information("Reset all active local rating epochs for {Jobs}.", jobs);
@@ -191,13 +184,14 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        matchPersistence.Drain();
         if (!matchStore.ResetRating(job))
         {
-            Print($"{job} has no active rating to reset.");
+            Print($"{job} has no active rating to reset for the latest captured character.");
             return;
         }
 
-        var success = $"{job} rating reset to 1500 Bronze. Match history kept. Community leaderboard unchanged.";
+        var success = $"{job} rating for the latest captured character reset to 1500 Bronze. Match history kept. Community leaderboard unchanged.";
         mainWindow.SetStatus(success);
         Print(success);
         log.Information("Reset local {Job} rating epoch.", job);
@@ -214,31 +208,36 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnMatchCaptured(MatchRecord captured)
     {
-        if (disposed) return;
+        if (disposed || matchPersistence.TryEnqueue(captured)) return;
 
-        try
-        {
-            var saved = matchStore.Add(captured);
-            if (saved is null) return;
+        log.Warning("A captured match arrived after the persistence queue stopped and was not accepted.");
+    }
 
-            mainWindow.NotifyMatch(saved);
-            log.Information(
-                "Recorded {Queue} CC match on {Job}: {Outcome}, rating {Before}->{After} ({Delta:+#;-#;0}).",
-                saved.Queue,
-                saved.LocalJob,
-                saved.Outcome,
-                saved.RatingBefore,
-                saved.RatingAfter,
-                saved.RatingDelta);
+    // MatchStore.Add performs an atomic write and may rebuild historical
+    // aggregates. The serial worker keeps that growing work off Dalamud's
+    // framework update while preserving admission order.
+    private void StoreCapturedMatch(MatchRecord captured)
+    {
+        var saved = matchStore.Add(captured);
+        if (saved is null) return;
 
-            UpdateLeaderboardOutboxState();
-            leaderboardOutbox.Enqueue(saved.Id);
-        }
-        catch (Exception exception)
-        {
-            log.Error(exception, "Failed to store a captured match.");
-            mainWindow.SetStatus("Match capture failed; see the Dalamud log.", true);
-        }
+        mainWindow.NotifyMatch(saved);
+        log.Information(
+            "Recorded {Queue} CC match on {Job}: {Outcome}, rating {Before}->{After} ({Delta:+#;-#;0}).",
+            saved.Queue,
+            saved.LocalJob,
+            saved.Outcome,
+            saved.RatingBefore,
+            saved.RatingAfter,
+            saved.RatingDelta);
+
+        leaderboardOutbox.Enqueue(saved.Id);
+    }
+
+    private void HandleMatchStoreFailure(MatchRecord _, Exception exception)
+    {
+        log.Error(exception, "Failed to store a captured match.");
+        mainWindow.SetStatus("Match capture failed; see the Dalamud log.", true);
     }
 
     private void OnLeaderboardStatusChanged(string message, bool isError)
@@ -246,28 +245,4 @@ public sealed class Plugin : IDalamudPlugin
         if (!disposed) mainWindow.SetStatus(message, isError);
     }
 
-    private void OnClientLogin() => UpdateLeaderboardOutboxState();
-
-    private void OnClientLogout(int _, int __)
-    {
-        if (disposed) return;
-        leaderboardOutbox.UpdateState(
-            Configuration.ServerBaseUrl,
-            Configuration.IsRegistered ? Configuration.PlayerId : null,
-            Configuration.IsRegistered ? Configuration.ApiKey : string.Empty,
-            false);
-    }
-
-    private void UpdateLeaderboardOutboxState()
-    {
-        if (disposed) return;
-        var identityMatches =
-            LocalCharacterIdentityReader.TryRead(clientState, playerState, out var identity, out _) &&
-            Configuration.MatchesRegisteredIdentity(identity.CharacterName, identity.WorldId);
-        leaderboardOutbox.UpdateState(
-            Configuration.ServerBaseUrl,
-            Configuration.IsRegistered ? Configuration.PlayerId : null,
-            Configuration.IsRegistered ? Configuration.ApiKey : string.Empty,
-            Configuration.ShareLeaderboard && identityMatches);
-    }
 }

@@ -21,7 +21,8 @@ Crystal Job Rank deliberately takes a much smaller scope:
 - no opponent profiling outside the locally stored result screen;
 - local JSON persistence with atomic replacement;
 - a new job-isolated outcome rating;
-- an opt-in backend that uploads only the local player's row.
+- an automatic character/job leaderboard that uploads only the local player's
+  eligible result and never another player's row.
 
 Primary references:
 
@@ -35,4 +36,3 @@ The official Dalamud restrictions state that PvP plugins are generally not
 accepted when they could confer competitive advantage. Even though this project
 is post-match only, a custom repository is the realistic distribution channel
 unless the approval team explicitly agrees otherwise.
-

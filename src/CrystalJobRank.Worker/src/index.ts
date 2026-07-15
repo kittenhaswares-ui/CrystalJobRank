@@ -4,12 +4,10 @@ import {
   type CombatJob,
   InputError,
   type MatchSubmission,
-  normalizeCharacterName,
-  normalizeWorldName,
   parseJobQuery,
   parseLeaderboardLimit,
   parseMatchSubmission,
-  parseWorldId,
+  PROVISIONAL_MATCHES,
   RATING_RULES_VERSION,
 } from "./domain";
 
@@ -17,16 +15,12 @@ interface SettingsRow {
   schema_version: number;
   rating_rules_version: number;
   current_season: number;
-}
-
-interface AuthenticatedPlayerRow {
-  id: string;
-  current_season: number;
+  season_started_at_utc: string;
+  season_ended_at_utc: string | null;
 }
 
 interface ExistingMatchRow {
   payload_hash: string;
-  season_id: number;
 }
 
 interface RatingDbRow {
@@ -46,180 +40,62 @@ interface MatchLimitRow {
   daily_count: number;
 }
 
-interface ReplayLimitRow {
-  history_count: number;
-  has_later_match: number;
-}
-
-interface RegistrationLimitRow {
-  daily_count: number;
-}
-
 const MAX_JSON_BODY_BYTES = 16 * 1024;
-const API_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-const EXPECTED_SCHEMA_VERSION = 3;
-const DAILY_JOB_MATCH_LIMIT = 100;
-const SEASON_JOB_MATCH_LIMIT = 5_000;
-const LATE_MATCH_REPLAY_LIMIT = 128;
-const GLOBAL_DAILY_REGISTRATION_LIMIT = 100;
+const INSTALLATION_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const EXPECTED_SCHEMA_VERSION = 4;
+const DAILY_CHARACTER_JOB_MATCH_LIMIT = 100;
+const SEASON_CHARACTER_JOB_MATCH_LIMIT = 5_000;
 const HEALTH_CACHE_TTL_SECONDS = 15;
-const HEALTH_CACHE_NAME = "crystal-job-rank-health-v3";
+const HEALTH_CACHE_NAME = "crystal-job-rank-health-v4";
+
+const UPSERT_CHARACTER_SQL = `
+  INSERT INTO characters (
+    identity_key, character_name, world_id, world_name,
+    created_at_utc, updated_at_utc
+  ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+  ON CONFLICT(identity_key) DO UPDATE SET
+    character_name = excluded.character_name,
+    world_name = excluded.world_name,
+    updated_at_utc = excluded.updated_at_utc
+`;
 
 const INSERT_MATCH_SQL = `
   INSERT INTO matches (
-    id, season_id, player_id, fingerprint, payload_hash,
+    season_id, identity_key, match_key, payload_hash,
     completed_at_utc, received_at_utc, job, outcome, queue
-  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 `;
 
-// The common append-only case advances the materialized rating in constant
-// time. A complete canonical replay happens only for a genuinely out-of-order
-// event or a missing/stale cache. The decision is made after INSERT_MATCH_SQL,
-// inside the same D1 transaction, so concurrent different fingerprints cannot
-// race the fast-path check.
-const REFRESH_RATING_SQL = `
-  WITH RECURSIVE
-  args (
-    season_id, player_id, job, new_completed_at_utc,
-    new_fingerprint, new_outcome, updated_at_utc
-  ) AS (
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-  ),
-  rating_context AS (
-    SELECT
-      args.*,
-      COALESCE(cached.rating, 1500) AS cached_rating,
-      COALESCE(cached.matches, 0) AS cached_matches,
-      COALESCE(cached.wins, 0) AS cached_wins,
-      COALESCE(cached.losses, 0) AS cached_losses,
-      CASE WHEN cached.player_id IS NULL THEN 0 ELSE 1 END AS cached_present,
-      CASE WHEN EXISTS (
-        SELECT 1
-        FROM matches other
-        WHERE other.season_id = args.season_id
-          AND other.player_id = args.player_id
-          AND other.job = args.job
-          AND other.fingerprint <> args.new_fingerprint COLLATE BINARY
-        LIMIT 1
-      ) THEN 1 ELSE 0 END AS has_other_match,
-      CASE WHEN NOT EXISTS (
-        SELECT 1
-        FROM matches later
-        WHERE later.season_id = args.season_id
-          AND later.player_id = args.player_id
-          AND later.job = args.job
-          AND (
-            later.completed_at_utc > args.new_completed_at_utc COLLATE BINARY OR
-            (later.completed_at_utc = args.new_completed_at_utc COLLATE BINARY AND
-             later.fingerprint > args.new_fingerprint COLLATE BINARY)
-          )
-      ) THEN 1 ELSE 0 END AS new_is_latest
-    FROM args
-    LEFT JOIN ratings cached
-      ON cached.season_id = args.season_id
-     AND cached.player_id = args.player_id
-     AND cached.job = args.job
-  ),
-  mode AS (
-    SELECT *,
-      CASE WHEN new_is_latest = 1 AND (cached_present = 1 OR has_other_match = 0)
-        THEN 1 ELSE 0 END AS can_fast_path
-    FROM rating_context
-  ),
-  fast_delta AS (
-    SELECT *,
-      CAST(round(
-        (CASE WHEN cached_matches < 10 THEN 64.0 ELSE 32.0 END) *
-        ((CASE WHEN new_outcome = 1 THEN 1.0 ELSE 0.0 END) -
-          (1.0 / (1.0 + pow(10.0, (1500.0 - cached_rating) / 2000.0)))),
-        0
-      ) AS INTEGER) AS raw_delta
-    FROM mode
-    WHERE can_fast_path = 1
-  ),
-  fast_result (rating, matches, wins, losses) AS (
-    SELECT
-      max(0, min(3000,
-        cached_rating + CASE WHEN raw_delta = 0
-          THEN CASE WHEN new_outcome = 1 THEN 1 ELSE -1 END
-          ELSE raw_delta END
-      )),
-      cached_matches + 1,
-      cached_wins + CASE WHEN new_outcome = 1 THEN 1 ELSE 0 END,
-      cached_losses + CASE WHEN new_outcome = 0 THEN 1 ELSE 0 END
-    FROM fast_delta
-  ),
-  ordered (sequence, outcome) AS (
-    SELECT
-      ROW_NUMBER() OVER (
-        ORDER BY event.completed_at_utc COLLATE BINARY, event.fingerprint COLLATE BINARY
-      ),
-      event.outcome
-    FROM matches event
-    JOIN mode
-      ON mode.can_fast_path = 0
-     AND event.season_id = mode.season_id
-     AND event.player_id = mode.player_id
-     AND event.job = mode.job
-  ),
-  replay (sequence, rating, matches, wins, losses) AS (
-    SELECT 0, 1500, 0, 0, 0
-    UNION ALL
-    SELECT
-      ordered.sequence,
-      max(0, min(3000,
-        replay.rating +
-        CASE
-          WHEN CAST(round(
-            (CASE WHEN replay.matches < 10 THEN 64.0 ELSE 32.0 END) *
-            ((CASE WHEN ordered.outcome = 1 THEN 1.0 ELSE 0.0 END) -
-              (1.0 / (1.0 + pow(10.0, (1500.0 - replay.rating) / 2000.0)))),
-            0
-          ) AS INTEGER) = 0
-          THEN CASE WHEN ordered.outcome = 1 THEN 1 ELSE -1 END
-          ELSE CAST(round(
-            (CASE WHEN replay.matches < 10 THEN 64.0 ELSE 32.0 END) *
-            ((CASE WHEN ordered.outcome = 1 THEN 1.0 ELSE 0.0 END) -
-              (1.0 / (1.0 + pow(10.0, (1500.0 - replay.rating) / 2000.0)))),
-            0
-          ) AS INTEGER)
-        END
-      )),
-      replay.matches + 1,
-      replay.wins + CASE WHEN ordered.outcome = 1 THEN 1 ELSE 0 END,
-      replay.losses + CASE WHEN ordered.outcome = 0 THEN 1 ELSE 0 END
-    FROM replay
-    JOIN ordered ON ordered.sequence = replay.sequence + 1
-  ),
-  full_result (rating, matches, wins, losses) AS (
-    SELECT replay.rating, replay.matches, replay.wins, replay.losses
-    FROM replay
-    JOIN mode
-      ON mode.can_fast_path = 0
-    ORDER BY replay.sequence DESC
-    LIMIT 1
-  ),
-  final_result (rating, matches, wins, losses) AS (
-    SELECT rating, matches, wins, losses FROM fast_result
-    UNION ALL
-    SELECT rating, matches, wins, losses FROM full_result
+// Rules v4 is based only on aggregate wins and losses. Each accepted event is
+// therefore an O(1) counter update and concurrent/out-of-order delivery cannot
+// change the result.
+const UPSERT_RATING_SQL = `
+  INSERT INTO ratings (
+    season_id, identity_key, job, rating,
+    matches, wins, losses, updated_at_utc
+  ) VALUES (
+    ?1, ?2, ?3,
+    1500 + CAST(round(1000.0 * (?4 - ?5) / 41.0, 0) AS INTEGER),
+    1, ?4, ?5, ?6
   )
-  INSERT OR REPLACE INTO ratings (
-    season_id, player_id, job, rating, matches, wins, losses, updated_at_utc
-  )
-  SELECT
-    mode.season_id, mode.player_id, mode.job,
-    final_result.rating, final_result.matches,
-    final_result.wins, final_result.losses,
-    mode.updated_at_utc
-  FROM mode
-  JOIN final_result
+  ON CONFLICT(season_id, identity_key, job) DO UPDATE SET
+    rating = 1500 + CAST(round(
+      1000.0 * (
+        (ratings.wins + excluded.wins) -
+        (ratings.losses + excluded.losses)
+      ) / (ratings.matches + 41.0),
+      0
+    ) AS INTEGER),
+    matches = ratings.matches + 1,
+    wins = ratings.wins + excluded.wins,
+    losses = ratings.losses + excluded.losses,
+    updated_at_utc = excluded.updated_at_utc
 `;
 
 const SELECT_RATING_SQL = `
   SELECT rating, matches, wins, losses
   FROM ratings
-  WHERE season_id = ?1 AND player_id = ?2 AND job = ?3
+  WHERE season_id = ?1 AND identity_key = ?2 AND job = ?3
 `;
 
 export default {
@@ -231,7 +107,13 @@ export default {
       if (error instanceof HttpError) return errorResponse(error.status, error.message, error.headers);
       if (error instanceof InputError) return errorResponse(400, error.message);
 
-      console.error("Unhandled leaderboard request failure", { requestId });
+      console.error(JSON.stringify({
+        event: "leaderboard_request_failed",
+        requestId,
+        method: request.method,
+        path: new URL(request.url).pathname,
+        error: error instanceof Error ? error.name : "UnknownError",
+      }));
       return errorResponse(500, "The leaderboard service could not complete the request.");
     }
   },
@@ -246,12 +128,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     return health(request, env, ctx);
   }
 
-  if (path === "/v1/players/register") {
-    if (request.method !== "POST") return methodNotAllowed("POST");
-    return register(request, env);
-  }
-
-  if (path === "/v1/matches") {
+  if (path === "/v2/matches") {
     if (request.method !== "POST") return methodNotAllowed("POST");
     return submitMatch(request, env);
   }
@@ -259,11 +136,6 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (path === "/v1/leaderboard") {
     if (request.method !== "GET") return methodNotAllowed("GET");
     return leaderboard(request, url, env);
-  }
-
-  if (path === "/v1/players/me") {
-    if (request.method !== "DELETE") return methodNotAllowed("DELETE");
-    return deletePlayer(request, env);
   }
 
   return errorResponse(404, "Route not found.");
@@ -283,31 +155,21 @@ async function health(request: Request, env: Env, ctx: ExecutionContext): Promis
   }
 
   try {
-    const settings = await env.DB
-      .prepare(
-        `SELECT settings.schema_version, settings.rating_rules_version, settings.current_season
-         FROM app_settings settings
-         JOIN seasons active_season ON active_season.id = settings.current_season
-         WHERE settings.id = 1`,
-      )
-      .first<SettingsRow>();
-    if (
-      !settings ||
-      settings.schema_version !== EXPECTED_SCHEMA_VERSION ||
-      settings.rating_rules_version !== RATING_RULES_VERSION ||
-      settings.current_season < 1
-    ) {
+    const settings = await readSettings(env.DB);
+    if (!settingsAreCurrent(settings)) {
       return errorResponse(503, "Leaderboard database configuration is invalid.");
     }
 
-    const response = jsonResponse({
-      status: "ok",
-      schemaVersion: settings.schema_version,
-      ratingRulesVersion: settings.rating_rules_version,
-      season: settings.current_season,
-    }, 200, {
-      "Cache-Control": `public, max-age=${HEALTH_CACHE_TTL_SECONDS}`,
-    });
+    const response = jsonResponse(
+      {
+        status: "ok",
+        schemaVersion: settings.schema_version,
+        ratingRulesVersion: settings.rating_rules_version,
+        season: settings.current_season,
+      },
+      200,
+      { "Cache-Control": `public, max-age=${HEALTH_CACHE_TTL_SECONDS}` },
+    );
     if (healthCache) {
       ctx.waitUntil(healthCache.put(cacheKey, response.clone()).catch(() => undefined));
     }
@@ -325,100 +187,57 @@ function canonicalHealthCacheKey(request: Request): Request {
   return new Request(url.toString(), { method: "GET" });
 }
 
-async function register(request: Request, env: Env): Promise<Response> {
-  await enforceRateLimit(env.REGISTRATION_RATE_LIMITER, await anonymousRateKey(request, "register"));
-  const body = requireObject(await readJson(request));
-  const characterName = normalizeCharacterName(body.characterName);
-  const worldId = parseWorldId(body.worldId);
-  const worldName = normalizeWorldName(body.worldName);
-  const identityKey = characterIdentityKey(characterName, worldId);
-
-  const existing = await env.DB
-    .prepare("SELECT id FROM players WHERE display_name_key = ?1")
-    .bind(identityKey)
-    .first<{ id: string }>();
-  if (existing) throw new HttpError(409, "That character is already registered on this World.");
-
-  const now = new Date().toISOString();
-  const registrationLimit = await registrationLimitStatus(env.DB, now);
-  if (registrationLimit.daily_count >= GLOBAL_DAILY_REGISTRATION_LIMIT) {
-    throw registrationLimitError(now);
-  }
-
-  const playerId = crypto.randomUUID();
-  const apiKey = generateApiKey();
-  const apiKeyHash = await sha256Hex(apiKey);
-  try {
-    await env.DB
-      .prepare(
-        `INSERT INTO players (
-           id, display_name, display_name_key, world_id, world_name, api_key_hash, created_at_utc
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
-      )
-      .bind(playerId, characterName, identityKey, worldId, worldName, apiKeyHash, now)
-      .run();
-  } catch (error) {
-    const raced = await env.DB
-      .prepare("SELECT id FROM players WHERE display_name_key = ?1")
-      .bind(identityKey)
-      .first<{ id: string }>();
-    if (raced) throw new HttpError(409, "That character is already registered on this World.");
-
-    const racedLimit = await registrationLimitStatus(env.DB, now);
-    if (racedLimit.daily_count >= GLOBAL_DAILY_REGISTRATION_LIMIT) {
-      throw registrationLimitError(now);
-    }
-    throw error;
-  }
-
-  return jsonResponse({ playerId, apiKey });
-}
-
 async function submitMatch(request: Request, env: Env): Promise<Response> {
-  await enforceRateLimit(env.AUTH_RATE_LIMITER, await anonymousRateKey(request, "auth"));
-  const apiKey = requireApiKey(request);
-  const apiKeyHash = await sha256Hex(apiKey);
-  const player = await authenticate(env.DB, apiKeyHash);
-  if (!player) throw new HttpError(401, "A valid API key is required.");
-  await enforceRateLimit(env.WRITE_RATE_LIMITER, `account:${apiKeyHash}`);
+  await enforceRateLimit(env.AUTH_RATE_LIMITER, await anonymousRateKey(request, "write"));
+  const installationKey = requireInstallationKey(request);
+  const installationHash = await sha256Hex(installationKey);
+  await enforceRateLimit(env.WRITE_RATE_LIMITER, `installation:${installationHash}`);
 
   const submission = parseMatchSubmission(await readJson(request));
+  const identityKey = characterIdentityKey(submission.characterName, submission.worldId);
   const payloadHash = await sha256Hex(canonicalSubmission(submission));
+  const settings = await requireCurrentSettings(env.DB);
+  if (Date.parse(submission.completedAtUtc) < Date.parse(settings.season_started_at_utc)) {
+    throw new HttpError(409, "This match was completed before the current community season started.");
+  }
 
   const duplicate = await findDuplicate(
     env.DB,
-    player.id,
-    submission.fingerprint,
+    settings.current_season,
+    identityKey,
+    submission.matchKey,
   );
   if (duplicate) {
-    return duplicateMatchResponse(env.DB, player, submission, payloadHash, duplicate);
-  }
-
-  const replayLimit = await replayLimitStatus(
-    env.DB,
-    player.current_season,
-    player.id,
-    submission.job,
-    submission.completedAtUtc,
-    submission.fingerprint,
-  );
-  if (
-    replayLimit.history_count >= LATE_MATCH_REPLAY_LIMIT &&
-    replayLimit.has_later_match === 1
-  ) {
-    throw lateMatchReplayLimitError();
+    return duplicateMatchResponse(
+      env.DB,
+      settings.current_season,
+      identityKey,
+      submission,
+      payloadHash,
+      duplicate,
+    );
   }
 
   const now = new Date().toISOString();
+  const wins = submission.outcome === 1 ? 1 : 0;
+  const losses = submission.outcome === 0 ? 1 : 0;
   try {
     const batch = await env.DB.batch([
       env.DB
+        .prepare(UPSERT_CHARACTER_SQL)
+        .bind(
+          identityKey,
+          submission.characterName,
+          submission.worldId,
+          submission.worldName,
+          now,
+        ),
+      env.DB
         .prepare(INSERT_MATCH_SQL)
         .bind(
-          crypto.randomUUID(),
-          player.current_season,
-          player.id,
-          submission.fingerprint,
+          settings.current_season,
+          identityKey,
+          submission.matchKey,
           payloadHash,
           submission.completedAtUtc,
           now,
@@ -427,66 +246,62 @@ async function submitMatch(request: Request, env: Env): Promise<Response> {
           submission.queue,
         ),
       env.DB
-        .prepare(REFRESH_RATING_SQL)
+        .prepare(UPSERT_RATING_SQL)
         .bind(
-          player.current_season,
-          player.id,
+          settings.current_season,
+          identityKey,
           submission.job,
-          submission.completedAtUtc,
-          submission.fingerprint,
-          submission.outcome,
+          wins,
+          losses,
           now,
         ),
       env.DB
         .prepare(SELECT_RATING_SQL)
-        .bind(player.current_season, player.id, submission.job),
+        .bind(settings.current_season, identityKey, submission.job),
     ]);
 
-    const rating = resultRow<RatingDbRow>(batch[2]);
+    const rating = resultRow<RatingDbRow>(batch[3]);
     if (!rating) throw new Error("Rating materialization returned no row.");
     return jsonResponse(toRatingState(submission.job, rating));
   } catch (error) {
-    // The UNIQUE constraint is authoritative. If two identical retries race,
-    // the loser of the insert reads the winner and returns the same 200 result.
+    // The unique key is authoritative. Concurrent exact retries return the
+    // winner's current rating, while a reused key with different data is a
+    // permanent conflict.
     const raced = await findDuplicate(
       env.DB,
-      player.id,
-      submission.fingerprint,
+      settings.current_season,
+      identityKey,
+      submission.matchKey,
     );
-    if (raced) return duplicateMatchResponse(env.DB, player, submission, payloadHash, raced);
+    if (raced) {
+      return duplicateMatchResponse(
+        env.DB,
+        settings.current_season,
+        identityKey,
+        submission,
+        payloadHash,
+        raced,
+      );
+    }
 
-    const racedReplayLimit = await replayLimitStatus(
-      env.DB,
-      player.current_season,
-      player.id,
-      submission.job,
-      submission.completedAtUtc,
-      submission.fingerprint,
-    );
-    if (
-      racedReplayLimit.history_count >= LATE_MATCH_REPLAY_LIMIT &&
-      racedReplayLimit.has_later_match === 1
-    ) {
-      throw lateMatchReplayLimitError();
+    if (databaseErrorContains(error, "match_outside_current_season")) {
+      throw new HttpError(409, "The community season changed before this match could be stored.");
     }
 
     const limit = await matchLimitStatus(
       env.DB,
-      player.current_season,
-      player.id,
+      settings.current_season,
+      identityKey,
       submission.job,
       now,
     );
-    if (limit.daily_count >= DAILY_JOB_MATCH_LIMIT) {
-      throw new HttpError(429, "Daily match limit for this job has been reached.", {
+    if (limit.daily_count >= DAILY_CHARACTER_JOB_MATCH_LIMIT) {
+      throw new HttpError(429, "Daily match limit for this character and job has been reached.", {
         "Retry-After": secondsUntilNextUtcDay(now).toString(),
       });
     }
-    if (limit.season_count >= SEASON_JOB_MATCH_LIMIT) {
-      // This limit cannot clear until the next season. Treat it as a permanent
-      // conflict so ordered plugin outboxes can discard this submission and
-      // continue with later matches instead of retrying the head forever.
-      throw new HttpError(409, "Season match limit for this job has been reached.");
+    if (limit.season_count >= SEASON_CHARACTER_JOB_MATCH_LIMIT) {
+      throw new HttpError(409, "Season match limit for this character and job has been reached.");
     }
     throw error;
   }
@@ -494,21 +309,19 @@ async function submitMatch(request: Request, env: Env): Promise<Response> {
 
 async function duplicateMatchResponse(
   db: D1Database,
-  player: AuthenticatedPlayerRow,
+  season: number,
+  identityKey: string,
   submission: MatchSubmission,
   payloadHash: string,
   duplicate: ExistingMatchRow,
 ): Promise<Response> {
   if (duplicate.payload_hash !== payloadHash) {
-    throw new HttpError(409, "This fingerprint was already submitted with different match data.");
-  }
-  if (duplicate.season_id !== player.current_season) {
-    throw new HttpError(409, "This fingerprint was already submitted in another leaderboard season.");
+    throw new HttpError(409, "This match key was already submitted with different match data.");
   }
 
   const rating = await db
     .prepare(SELECT_RATING_SQL)
-    .bind(player.current_season, player.id, submission.job)
+    .bind(season, identityKey, submission.job)
     .first<RatingDbRow>();
   if (!rating) throw new Error("An accepted match has no materialized rating.");
   return jsonResponse(toRatingState(submission.job, rating));
@@ -521,81 +334,97 @@ async function leaderboard(request: Request, url: URL, env: Env): Promise<Respon
   const result = await env.DB
     .prepare(
       `SELECT
-         p.display_name AS character_name, p.world_name,
+         c.character_name, c.world_name,
          r.rating, r.matches, r.wins, r.losses
        FROM ratings r
-       JOIN players p ON p.id = r.player_id
+       JOIN characters c ON c.identity_key = r.identity_key
        JOIN app_settings settings ON settings.id = 1 AND settings.current_season = r.season_id
        WHERE r.job = ?1 AND r.matches > 0
        ORDER BY
-         r.rating DESC, r.matches DESC,
-         p.display_name COLLATE NOCASE,
-         p.world_name COLLATE NOCASE,
-         p.world_id,
-         p.id
-       LIMIT ?2`,
+         CASE WHEN r.matches >= ?2 THEN 0 ELSE 1 END,
+         CASE WHEN r.matches >= ?2 THEN r.rating END DESC,
+         r.matches DESC,
+         r.rating DESC,
+         c.character_name COLLATE NOCASE,
+         c.world_name COLLATE NOCASE,
+         c.world_id,
+         c.identity_key COLLATE BINARY
+       LIMIT ?3`,
     )
-    .bind(job, limit)
+    .bind(job, PROVISIONAL_MATCHES, limit)
     .all<LeaderboardDbRow>();
 
-  const rows = result.results.map((row, index) => ({
-    rank: index + 1,
-    characterName: row.character_name,
-    worldName: row.world_name,
-    job,
-    rating: row.rating,
-    matches: row.matches,
-    wins: row.wins,
-    losses: row.losses,
-    winRate: row.matches === 0 ? 0 : row.wins / row.matches,
-  }));
+  let establishedRank = 0;
+  const rows = result.results.map((row) => {
+    const isProvisional = row.matches < PROVISIONAL_MATCHES;
+    if (!isProvisional) establishedRank += 1;
+    return {
+      rank: isProvisional ? 0 : establishedRank,
+      characterName: row.character_name,
+      worldName: row.world_name,
+      job,
+      rating: row.rating,
+      matches: row.matches,
+      wins: row.wins,
+      losses: row.losses,
+      winRate: row.matches === 0 ? 0 : row.wins / row.matches,
+      isProvisional,
+    };
+  });
   return jsonResponse(rows, 200, { "Cache-Control": "public, max-age=15" });
 }
 
-async function deletePlayer(request: Request, env: Env): Promise<Response> {
-  await enforceRateLimit(env.AUTH_RATE_LIMITER, await anonymousRateKey(request, "auth"));
-  const apiKey = requireApiKey(request);
-  const apiKeyHash = await sha256Hex(apiKey);
-  const player = await authenticate(env.DB, apiKeyHash);
-  if (!player) throw new HttpError(401, "A valid API key is required.");
-  await enforceRateLimit(env.WRITE_RATE_LIMITER, `account:${apiKeyHash}`);
-
-  await env.DB
-    .prepare("DELETE FROM players WHERE id = ?1 AND api_key_hash = ?2")
-    .bind(player.id, apiKeyHash)
-    .run();
-  return emptyResponse(204);
-}
-
-async function authenticate(db: D1Database, apiKeyHash: string): Promise<AuthenticatedPlayerRow | null> {
+async function readSettings(db: D1Database): Promise<SettingsRow | null> {
   return db
     .prepare(
-      `SELECT players.id, app_settings.current_season
-       FROM players CROSS JOIN app_settings
-       WHERE players.api_key_hash = ?1 AND app_settings.id = 1`,
+       `SELECT settings.schema_version, settings.rating_rules_version, settings.current_season
+             , active_season.started_at_utc AS season_started_at_utc
+             , active_season.ended_at_utc AS season_ended_at_utc
+        FROM app_settings settings
+       JOIN seasons active_season ON active_season.id = settings.current_season
+       WHERE settings.id = 1`,
     )
-    .bind(apiKeyHash)
-    .first<AuthenticatedPlayerRow>();
+    .first<SettingsRow>();
+}
+
+function settingsAreCurrent(settings: SettingsRow | null): settings is SettingsRow {
+  return Boolean(
+    settings &&
+    settings.schema_version === EXPECTED_SCHEMA_VERSION &&
+    settings.rating_rules_version === RATING_RULES_VERSION &&
+    settings.current_season >= 2 &&
+    settings.season_ended_at_utc === null &&
+    Number.isFinite(Date.parse(settings.season_started_at_utc)),
+  );
+}
+
+async function requireCurrentSettings(db: D1Database): Promise<SettingsRow> {
+  const settings = await readSettings(db);
+  if (!settingsAreCurrent(settings)) {
+    throw new HttpError(503, "Leaderboard database configuration is invalid.");
+  }
+  return settings;
 }
 
 async function findDuplicate(
   db: D1Database,
-  playerId: string,
-  fingerprint: string,
+  season: number,
+  identityKey: string,
+  matchKey: string,
 ): Promise<ExistingMatchRow | null> {
   return db
     .prepare(
-      `SELECT payload_hash, season_id FROM matches
-       WHERE player_id = ?1 AND fingerprint = ?2`,
+      `SELECT payload_hash FROM matches
+       WHERE season_id = ?1 AND identity_key = ?2 AND match_key = ?3`,
     )
-    .bind(playerId, fingerprint)
+    .bind(season, identityKey, matchKey)
     .first<ExistingMatchRow>();
 }
 
 async function matchLimitStatus(
   db: D1Database,
   season: number,
-  playerId: string,
+  identityKey: string,
   job: CombatJob,
   receivedAtUtc: string,
 ): Promise<MatchLimitRow> {
@@ -605,84 +434,15 @@ async function matchLimitStatus(
       .prepare(
         `SELECT
            (SELECT COUNT(*) FROM matches
-            WHERE season_id = ?1 AND player_id = ?2 AND job = ?3) AS season_count,
+            WHERE season_id = ?1 AND identity_key = ?2 AND job = ?3) AS season_count,
            (SELECT COUNT(*) FROM matches
-            WHERE player_id = ?2 AND job = ?3
+            WHERE identity_key = ?2 AND job = ?3
               AND received_at_utc >= (?4 || 'T00:00:00.000Z')
               AND received_at_utc < (date(?4, '+1 day') || 'T00:00:00.000Z')) AS daily_count`,
       )
-      .bind(season, playerId, job, day)
+      .bind(season, identityKey, job, day)
       .first<MatchLimitRow>()) ?? { season_count: 0, daily_count: 0 }
   );
-}
-
-async function replayLimitStatus(
-  db: D1Database,
-  season: number,
-  playerId: string,
-  job: CombatJob,
-  completedAtUtc: string,
-  fingerprint: string,
-): Promise<ReplayLimitRow> {
-  return (
-    (await db
-      .prepare(
-        `SELECT
-           (SELECT COUNT(*) FROM (
-              SELECT 1
-              FROM matches history
-              WHERE history.season_id = ?1
-                AND history.player_id = ?2
-                AND history.job = ?3
-              LIMIT ?6
-            )) AS history_count,
-           EXISTS(
-             SELECT 1
-             FROM matches later
-             WHERE later.season_id = ?1
-               AND later.player_id = ?2
-               AND later.job = ?3
-               AND (
-                 later.completed_at_utc > ?4 COLLATE BINARY OR
-                 (later.completed_at_utc = ?4 COLLATE BINARY AND
-                  later.fingerprint > ?5 COLLATE BINARY)
-               )
-             LIMIT 1
-           ) AS has_later_match`,
-      )
-      .bind(season, playerId, job, completedAtUtc, fingerprint, LATE_MATCH_REPLAY_LIMIT)
-      .first<ReplayLimitRow>()) ?? { history_count: 0, has_later_match: 0 }
-  );
-}
-
-async function registrationLimitStatus(
-  db: D1Database,
-  createdAtUtc: string,
-): Promise<RegistrationLimitRow> {
-  const day = createdAtUtc.slice(0, 10);
-  return (
-    (await db
-      .prepare(
-        `SELECT registration_count AS daily_count
-         FROM daily_registration_counts
-         WHERE day_utc = ?1`,
-      )
-      .bind(day)
-      .first<RegistrationLimitRow>()) ?? { daily_count: 0 }
-  );
-}
-
-function lateMatchReplayLimitError(): HttpError {
-  return new HttpError(
-    409,
-    `Late matches are accepted only before this job reaches ${LATE_MATCH_REPLAY_LIMIT} season matches.`,
-  );
-}
-
-function registrationLimitError(now: string): HttpError {
-  return new HttpError(429, "The leaderboard's daily registration capacity has been reached.", {
-    "Retry-After": secondsUntilNextUtcDay(now).toString(),
-  });
 }
 
 function toRatingState(job: CombatJob, rating: RatingDbRow) {
@@ -693,6 +453,7 @@ function toRatingState(job: CombatJob, rating: RatingDbRow) {
     wins: rating.wins,
     losses: rating.losses,
     winRate: rating.matches === 0 ? 0 : rating.wins / rating.matches,
+    isProvisional: rating.matches < PROVISIONAL_MATCHES,
   };
 }
 
@@ -737,19 +498,12 @@ async function readJson(request: Request): Promise<unknown> {
   }
 }
 
-function requireObject(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new InputError("Request body must contain a JSON object.");
+function requireInstallationKey(request: Request): string {
+  const installationKey = request.headers.get("X-Installation-Key") ?? "";
+  if (!INSTALLATION_KEY_PATTERN.test(installationKey)) {
+    throw new HttpError(401, "A valid installation key is required.");
   }
-  return value as Record<string, unknown>;
-}
-
-function requireApiKey(request: Request): string {
-  const apiKey = request.headers.get("X-Api-Key") ?? "";
-  if (!API_KEY_PATTERN.test(apiKey)) {
-    throw new HttpError(401, "A valid API key is required.");
-  }
-  return apiKey;
+  return installationKey;
 }
 
 async function enforceRateLimit(limiter: RateLimit, key: string): Promise<void> {
@@ -777,15 +531,12 @@ export async function sha256Hex(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function generateApiKey(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
 function resultRow<T>(result: D1Result<unknown> | undefined): T | null {
   return (result?.results[0] as T | undefined) ?? null;
+}
+
+function databaseErrorContains(error: unknown, marker: string): boolean {
+  return error instanceof Error && error.message.includes(marker);
 }
 
 function normalizePath(path: string): string {
@@ -810,10 +561,6 @@ function jsonResponse(
 
 function errorResponse(status: number, message: string, headers: Record<string, string> = {}): Response {
   return jsonResponse({ error: message }, status, { "Cache-Control": "no-store", ...headers });
-}
-
-function emptyResponse(status: number): Response {
-  return new Response(null, { status, headers: responseHeaders({ "Cache-Control": "no-store" }) });
 }
 
 function responseHeaders(extra: Record<string, string>): Headers {

@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using CrystalJobRank.Core;
+using CrystalJobRank.Plugin.Models;
 
 namespace CrystalJobRank.Plugin.Services;
 
@@ -23,37 +24,19 @@ internal sealed class LeaderboardClient : IDisposable
 
     public void Dispose() => httpClient.Dispose();
 
-    public async Task<RegistrationResponse> RegisterAsync(
-        string baseUrl,
-        string characterName,
-        uint worldId,
-        string worldName,
-        CancellationToken cancellationToken = default)
-    {
-        var endpoint = BuildUri(baseUrl, "v1/players/register");
-        var registration = Validation.NormalizeRegistration(characterName, worldId, worldName);
-        using var response = await httpClient.PostAsJsonAsync(
-            endpoint,
-            registration,
-            cancellationToken);
-        await EnsureSuccessAsync(response, cancellationToken);
-        return await response.Content.ReadFromJsonAsync<RegistrationResponse>(cancellationToken)
-            ?? throw new InvalidOperationException("The server returned an empty registration response.");
-    }
-
     public async Task SubmitAsync(
         string baseUrl,
-        string apiKey,
-        MatchSubmission submission,
+        string installationKey,
+        LeaderboardMatchSubmission submission,
         CancellationToken cancellationToken = default)
     {
         if (!RatingEngine.IsRatedQueue(submission.Queue)) return;
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, BuildUri(baseUrl, "v1/matches"))
+        using var request = new HttpRequestMessage(HttpMethod.Post, BuildUri(baseUrl, "v2/matches"))
         {
             Content = JsonContent.Create(submission),
         };
-        request.Headers.Add("X-Api-Key", apiKey);
+        request.Headers.Add("X-Installation-Key", installationKey);
         using var response = await httpClient.SendAsync(request, cancellationToken);
         await EnsureSuccessAsync(response, cancellationToken);
     }
@@ -67,17 +50,6 @@ internal sealed class LeaderboardClient : IDisposable
         using var response = await httpClient.GetAsync(endpoint, cancellationToken);
         await EnsureSuccessAsync(response, cancellationToken);
         return await response.Content.ReadFromJsonAsync<List<LeaderboardRow>>(cancellationToken) ?? [];
-    }
-
-    public async Task DeleteAccountAsync(
-        string baseUrl,
-        string apiKey,
-        CancellationToken cancellationToken = default)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Delete, BuildUri(baseUrl, "v1/players/me"));
-        request.Headers.Add("X-Api-Key", apiKey);
-        using var response = await httpClient.SendAsync(request, cancellationToken);
-        await EnsureSuccessAsync(response, cancellationToken);
     }
 
     private static Uri BuildUri(string baseUrl, string relative)

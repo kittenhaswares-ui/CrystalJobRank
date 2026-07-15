@@ -39,10 +39,12 @@ internal static class MatchMetadata
 
     public static MatchQueue Queue(ushort dutyId)
     {
+        // Queue type comes only from the Content Finder condition. A normal two-player
+        // group uses the same Casual IDs as a solo Casual signup, so it is deliberately
+        // rated exactly the same: there is no party-size check or premade penalty here.
         if (CasualDuties.Contains(dutyId)) return MatchQueue.Casual;
         if (RankedDuties.Contains(dutyId)) return MatchQueue.Ranked;
         if (CustomDuties.Contains(dutyId)) return MatchQueue.Custom;
         return MatchQueue.Unknown;
     }
 }
-

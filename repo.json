@@ -2,11 +2,11 @@
   {
     "Author": "Crystal Job Rank contributors",
     "Name": "Crystal Job Rank",
-    "Punchline": "Per-job CC ratings, records, badges, and an opt-in ladder.",
-    "Description": "Tracks Casual and Ranked CC ratings per job, lifetime records, role streak badges, and an optional community leaderboard. Use /cjr.",
+    "Punchline": "Per-character, per-job CC ratings and an automatic community ladder.",
+    "Description": "Tracks Casual and Ranked CC ratings per character and job, local records, role badges, and an automatic cross-region community leaderboard. Use /cjr.",
     "InternalName": "CrystalJobRank.Plugin",
-    "AssemblyVersion": "0.5.0.0",
-    "Changelog": "Replaces editable leaderboard aliases with the logged-in character's full name and Home World. Joining remains optional, sharing is bound to that character, and switching characters pauses uploads. Old alias credentials and queued uploads are cleared once; local ratings, match history, records, and badges are preserved.",
+    "AssemblyVersion": "0.6.0.0",
+    "Changelog": "Starts rating rules v4 and a fresh season. Community participation is automatic with no registration or character lock; ratings are keyed by character, Home World, job, and season. Casual group matches count normally. Adds the transparent Beta(20,20) W/L formula, provisional entries from match one, deterministic duplicate protection, canonical World names, and safer background persistence; local history, non-rating records, and badges are preserved.",
     "RepoUrl": "https://github.com/kittenhaswares-ui/CrystalJobRank",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 15,
@@ -20,6 +20,6 @@
     "DownloadLinkInstall": "https://raw.githubusercontent.com/kittenhaswares-ui/CrystalJobRank/main/dist/latest.zip",
     "DownloadLinkUpdate": "https://raw.githubusercontent.com/kittenhaswares-ui/CrystalJobRank/main/dist/latest.zip",
     "DownloadLinkTesting": "https://raw.githubusercontent.com/kittenhaswares-ui/CrystalJobRank/main/dist/latest.zip",
-    "LastUpdate": "1784121013"
+    "LastUpdate": "1784141686"
   }
 ]

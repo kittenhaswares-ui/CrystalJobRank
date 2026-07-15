@@ -8,7 +8,12 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\CrystalJobRank.Core\CrystalJobRank.Core.csproj" />
     <Compile Include="..\..\src\CrystalJobRank.Plugin\Models\MatchRecord.cs" Link="PluginModels\MatchRecord.cs" />
+    <Compile Include="..\..\src\CrystalJobRank.Plugin\Models\PluginConfiguration.cs" Link="PluginModels\PluginConfiguration.cs" />
     <Compile Include="..\..\src\CrystalJobRank.Plugin\Models\PluginDataMigrations.cs" Link="PluginModels\PluginDataMigrations.cs" />
+    <Compile Include="..\..\src\CrystalJobRank.Plugin\Services\LeaderboardClient.cs" Link="PluginServices\LeaderboardClient.cs" />
+    <Compile Include="..\..\src\CrystalJobRank.Plugin\Services\LeaderboardOutbox.cs" Link="PluginServices\LeaderboardOutbox.cs" />
     <Compile Include="..\..\src\CrystalJobRank.Plugin\Services\LeaderboardOutboxState.cs" Link="PluginServices\LeaderboardOutboxState.cs" />
+    <Compile Include="..\..\src\CrystalJobRank.Plugin\Services\MatchStore.cs" Link="PluginServices\MatchStore.cs" />
+    <Compile Include="..\..\src\CrystalJobRank.Plugin\Services\SerialWorkQueue.cs" Link="PluginServices\SerialWorkQueue.cs" />
   </ItemGroup>
 </Project>

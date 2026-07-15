@@ -1,8 +1,8 @@
 {
   "Author": "Crystal Job Rank contributors",
   "Name": "Crystal Job Rank",
-  "Punchline": "Per-job CC ratings, records, badges, and an opt-in ladder.",
-  "Description": "Tracks Casual and Ranked CC ratings per job, lifetime records, role streak badges, and an optional community leaderboard. Use /cjr.",
+  "Punchline": "Per-character, per-job CC ratings and an automatic community ladder.",
+  "Description": "Tracks Casual and Ranked CC ratings per character and job, local records, role badges, and an automatic cross-region community leaderboard. Use /cjr.",
   "InternalName": "CrystalJobRank.Plugin",
   "RepoUrl": "https://github.com/kittenhaswares-ui/CrystalJobRank",
   "ApplicableVersion": "any",
