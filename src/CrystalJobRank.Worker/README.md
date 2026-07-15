@@ -39,21 +39,23 @@ The four `namespace_id` values in `wrangler.jsonc` are deliberately separate. If
 ## HTTP contract
 
 - `GET /health`
-- `POST /v1/players/register` with `{ "displayName": "..." }`
+- `POST /v1/players/register` with `{ "characterName": "...", "worldId": 21, "worldName": "Ravana" }`
 - `POST /v1/matches` with `X-Api-Key`
 - `GET /v1/leaderboard?job=DRK&limit=50`
 - `DELETE /v1/players/me` with `X-Api-Key`
 
-JSON field names and numeric enum values match the existing .NET plugin client. Only Casual (`1`) and Ranked (`2`) matches are rated. The server starts each job at 1500 and applies Rules v3 using the canonical `completedAtUtc`, then fingerprint ordering. Scoreboard performance never changes rating.
+JSON field names and numeric enum values match the existing .NET plugin client. Registration uses the character's official in-game name and Home World; identity uniqueness is the normalized `characterName` plus `worldId`. Public leaderboard rows expose `characterName` and `worldName`. Only Casual (`1`) and Ranked (`2`) matches are rated. The server starts each job at 1500 and applies Rules v3 using the canonical `completedAtUtc`, then fingerprint ordering. Scoreboard performance never changes rating.
+
+Schema migration 0003 intentionally invalidates legacy alias-only accounts and their dependent matches/ratings because no trustworthy Home World can be inferred. Registration counters are retained. Users register again with their official character identity after the migration.
 
 An identical retry is idempotent and returns the current rating with HTTP 200. Reusing a fingerprint for different data returns HTTP 409. The D1 unique constraint is the final duplicate authority. Match insertion and rating materialization run in one transactional batch: a chronologically newest match advances the cached rating in constant time, while a genuinely late match deterministically replays that player's job stream. Late matches are accepted only while that season/player/job history has fewer than 128 existing matches. At 128 and above, new chronologically latest matches and exact retries remain accepted, but another late match returns HTTP 409. A D1 trigger is authoritative even if concurrent requests pass the application preflight together.
 
 ## Privacy and abuse controls
 
 - API keys contain 256 random bits and are returned only once. D1 stores only their SHA-256 hashes.
-- The database stores the display name plus the minimum match fields required to verify idempotency and calculate rating. Scoreboard, territory, and duration values are validated but not retained as raw fields. A SHA-256 digest of the complete validated submission is retained so an exact retry can be distinguished from conflicting data.
+- The database stores the official character name, Home World ID/name, and the minimum match fields required to verify idempotency and calculate rating. Scoreboard, territory, and duration values are validated but not retained as raw fields. A SHA-256 digest of the complete validated submission is retained so an exact retry can be distinguished from conflicting data.
 - Account deletion relies on foreign-key cascades and removes the player's matches and ratings.
-- Worker observability is disabled by default. Application errors log only a random request ID—never request bodies, display names, fingerprints, IP addresses, or API keys.
+- Worker observability is disabled by default. Application errors log only a random request ID—never request bodies, character names, Home World metadata, fingerprints, IP addresses, or API keys.
 - Native free Workers rate-limit bindings allow 5 registrations, 60 authentication attempts, 15 combined authenticated writes per account, and 120 leaderboard/health reads per minute and key. Authentication is IP-limited before an API-key lookup or request-body read; authenticated writes are then keyed by API-key hash. Anonymous limits use a transient SHA-256 hash of the connecting address; the address is not stored in D1. Successful health responses are cached for 15 seconds under a query-free canonical key; failures are never cached.
 - No CORS headers are emitted. The Dalamud client does not need CORS, while browser cross-origin JSON requests and the custom API-key header therefore fail preflight.
 - JSON bodies are streamed and aborted as soon as they exceed 16 KiB. All SQL uses bound parameters, timestamps have a 90-day past/10-minute future window, and every numeric field has a strict range.

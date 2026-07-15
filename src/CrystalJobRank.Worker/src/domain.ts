@@ -78,29 +78,55 @@ export class InputError extends Error {
   }
 }
 
-const DISPLAY_NAME_PATTERN = /^[\p{L}\p{N} _.'-]+$/u;
+const CONTROL_CHARACTER_PATTERN = /\p{Cc}/u;
+const CHARACTER_NAME_PATTERN = /^[\p{L}\p{M}'-]+ [\p{L}\p{M}'-]+$/u;
+const WORLD_NAME_PATTERN = /^[\p{L}\p{M}\p{N}' -]+$/u;
 const UTC_TIMESTAMP_PATTERN = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,7}))?Z$/;
 const VALID_JOB_IDS = new Set<number>(Object.values(JOBS));
 
-export function normalizeDisplayName(value: unknown): string {
+export function normalizeCharacterName(value: unknown): string {
   if (typeof value !== "string") {
-    throw new InputError("Display name must be a string.");
+    throw new InputError("Character name must be a string.");
   }
 
-  const normalized = value.trim().normalize("NFC");
+  if (CONTROL_CHARACTER_PATTERN.test(value)) {
+    throw new InputError("Character name must not contain control characters.");
+  }
+
+  const parts = value.trim().normalize("NFC").split(/ +/u);
+  const normalized = parts.join(" ");
   if (
-    normalized.length < 2 ||
-    normalized.length > 24 ||
-    !DISPLAY_NAME_PATTERN.test(normalized)
+    parts.length !== 2 ||
+    normalized.length < 3 ||
+    normalized.length > 42 ||
+    !CHARACTER_NAME_PATTERN.test(normalized)
   ) {
-    throw new InputError("Display name must contain 2-24 letters, numbers, spaces, or ._'-.");
+    throw new InputError("Character name must contain exactly two name parts and 3-42 letters, apostrophes, or hyphens.");
   }
-
   return normalized;
 }
 
-export function displayNameKey(displayName: string): string {
-  return displayName.normalize("NFC").toLocaleLowerCase("en-US");
+export function parseWorldId(value: unknown): number {
+  return integerInRange(value, 1, 65_535, "World ID must be an integer between 1 and 65535.");
+}
+
+export function normalizeWorldName(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new InputError("World name must be a string.");
+  }
+  if (CONTROL_CHARACTER_PATTERN.test(value)) {
+    throw new InputError("World name must not contain control characters.");
+  }
+
+  const normalized = value.trim().normalize("NFC");
+  if (normalized.length < 1 || normalized.length > 32 || !WORLD_NAME_PATTERN.test(normalized)) {
+    throw new InputError("World name must contain 1-32 letters, numbers, spaces, apostrophes, or hyphens.");
+  }
+  return normalized;
+}
+
+export function characterIdentityKey(characterName: string, worldId: number): string {
+  return `${characterName.normalize("NFC").toLocaleLowerCase("en-US")}|${worldId}`;
 }
 
 export function parseJobQuery(value: string | null): CombatJob {

@@ -7,21 +7,28 @@ Crystalline Conflict statistics. It records the result screen, keeps a local
 match history, and calculates a separate community-style rating for every job
 you play.
 
-Version 0.4.2 gives every combat job its own clearly separated community
-standings screen. Jobs are grouped as Tank, Healer, Melee, Physical Ranged,
-and Caster. Choosing a job immediately loads its current top 50 with rank tier,
-rating, match record, win rate, and refresh time. A response is never displayed
-under a different job or server, and existing local ratings, history,
-leaderboard identity, and sharing choice are preserved.
+Version 0.5 uses the identity already shown in FFXIV instead of an editable
+public name. Joining the community leaderboard is optional and off by default.
+When you join, the plugin reads the currently logged-in character's full name
+and Home World through Dalamud; public entries are shown as
+`Character Name · Home World`. Updating once clears leaderboard credentials
+and queued uploads created by older versions, so you must join again. Local
+ratings, match history, records, and achievements are preserved.
+
+Every combat job has its own clearly separated community standings screen.
+Jobs are grouped as Tank, Healer, Melee, Physical Ranged, and Caster. Choosing
+a job immediately loads its current top 50 with rank tier, rating, match
+record, win rate, and refresh time. A response is never displayed under a
+different job or server.
 
 Version 0.4.1 connected the optional community leaderboard to the live hosted
 API at `https://crystal-job-rank-api.kittenhaswares.workers.dev`. Fresh
 installs use that address automatically. Existing installations that still
 contain the old placeholder address migrate once; custom server addresses,
-leaderboard credentials, and sharing choices are preserved. Registration and
-future match sharing remain separate opt-ins. Temporary upload failures stay in
-a bounded local FIFO queue and retry automatically without writing API keys or
-scoreboard rows to that queue.
+leaderboard credentials, and sharing choices were preserved by that release.
+Registration and future match sharing remain separate choices. Temporary
+upload failures stay in a bounded local FIFO queue and retry automatically
+without writing API keys or scoreboard rows to that queue.
 
 Version 0.4 adds official in-game job icons with rank-metal colors and
 job-specific ornaments, persistent personal records, and role achievements.
@@ -80,17 +87,20 @@ know the strength of a particular lobby.
 This repository also contains the opt-in community leaderboard API. A shared
 leaderboard cannot work from a static GitHub repository alone: it needs a
 common service that receives submissions. The reference service runs on a
-Cloudflare Worker with an EU-jurisdiction D1 database; creating an alias and
-enabling future match sharing are separate choices in the plugin. Raw arena,
-duration, and local scoreboard values are validated but not retained by the
-hosted database. Its production API base URL is
+Cloudflare Worker with an EU-jurisdiction D1 database. Joining automatically
+uses the current character's full name and Home World. Only the joining
+player's future Casual and Ranked results can be shared; existing history and
+other players' scoreboard data stay local. Raw arena, duration, and personal
+scoreboard values are validated but not retained by the hosted database. Its
+production API base URL is
 `https://crystal-job-rank-api.kittenhaswares.workers.dev`, with a public
 [health check](https://crystal-job-rank-api.kittenhaswares.workers.dev/health).
-Other players' names and IDs never leave the PC. See
-[`PRIVACY.md`](PRIVACY.md) for the complete data flow, public fields, retention,
-and deletion behavior. D1 constraints cap costly late-result replays, daily
-registrations, and per-job submission volume so the free shared service has
-authoritative abuse bounds beyond its edge rate limits.
+Public per-job rows contain character name, Home World, rank, rating, matches,
+wins, losses, and win rate. Sharing can be stopped at any time, and the online
+identity and its submitted data can be deleted from the plugin. See the short
+[`PRIVACY.md`](PRIVACY.md) notice for details. D1 constraints cap costly
+late-result replays, daily registrations, and per-job submission volume so the
+free shared service has authoritative abuse bounds beyond its edge rate limits.
 
 ## Status
 

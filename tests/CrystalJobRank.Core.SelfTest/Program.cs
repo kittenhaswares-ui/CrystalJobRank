@@ -29,7 +29,7 @@ var tests = new (string Name, Action Run)[]
     ("invalid match outcomes are rejected", InvalidOutcomeRejected),
     ("rating caps and movement directions are safe", RatingCaps),
     ("invalid rating jobs are rejected", InvalidRatingJobRejected),
-    ("validation rejects custom identity input", ValidationRejectsInvalidName),
+    ("character identity contract normalizes and rejects unsafe values", CharacterIdentityValidation),
     ("submission validation rejects invalid enums", SubmissionValidationRejectsInvalidEnums),
     ("leaderboard outbox stays ordered, bounded, and identity-bound", LeaderboardOutboxOrderingAndBinding),
     ("leaderboard retry backoff and HTTP classification are bounded", LeaderboardRetryBackoff),
@@ -519,18 +519,36 @@ static void InvalidRatingJobRejected()
     True(threw);
 }
 
-static void ValidationRejectsInvalidName()
+static void CharacterIdentityValidation()
 {
-    var threw = false;
-    try
-    {
-        Validation.NormalizeDisplayName("<script>");
-    }
-    catch (ArgumentException)
-    {
-        threw = true;
-    }
-    True(threw);
+    var identity = Validation.NormalizeRegistration("  A\u0301yla Sato  ", 74, "  Phoenix  ");
+    Equal("Áyla Sato", identity.CharacterName);
+    Equal(74u, identity.WorldId);
+    Equal("Phoenix", identity.WorldName);
+
+    var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+    var requestJson = JsonSerializer.Serialize(identity, options);
+    True(requestJson.Contains("\"characterName\"", StringComparison.Ordinal));
+    True(requestJson.Contains("\"worldId\":74", StringComparison.Ordinal));
+    True(requestJson.Contains("\"worldName\"", StringComparison.Ordinal));
+    True(!requestJson.Contains("displayName", StringComparison.OrdinalIgnoreCase));
+    Equal(identity, JsonSerializer.Deserialize<RegisterRequest>(requestJson, options)!);
+
+    var rowJson = JsonSerializer.Serialize(
+        new LeaderboardRow(1, "Áyla Sato", "Phoenix", CombatJob.SGE, 1600, 4, 3, 1, 0.75),
+        options);
+    True(rowJson.Contains("\"characterName\"", StringComparison.Ordinal));
+    True(rowJson.Contains("\"worldName\"", StringComparison.Ordinal));
+    True(!rowJson.Contains("displayName", StringComparison.OrdinalIgnoreCase));
+
+    Equal("Valid Name", Validation.NormalizeCharacterName("  Valid   Name  "));
+    ThrowsArgument(() => Validation.NormalizeRegistration("SingleAlias", 74, "Phoenix"));
+    ThrowsArgument(() => Validation.NormalizeRegistration("One Two Three", 74, "Phoenix"));
+    ThrowsArgument(() => Validation.NormalizeRegistration("Valid 😺", 74, "Phoenix"));
+    ThrowsArgument(() => Validation.NormalizeRegistration("Bad\nName", 74, "Phoenix"));
+    ThrowsArgument(() => Validation.NormalizeRegistration("Valid Name", 0, "Phoenix"));
+    ThrowsArgument(() => Validation.NormalizeRegistration("Valid Name", 65_536, "Phoenix"));
+    ThrowsArgument(() => Validation.NormalizeRegistration("Valid Name", 74, "Bad_World"));
 }
 
 static void SubmissionValidationRejectsInvalidEnums()
@@ -633,6 +651,20 @@ static void Equal<T>(T expected, T actual) where T : notnull
     {
         throw new InvalidOperationException($"Expected {expected}, got {actual}.");
     }
+}
+
+static void ThrowsArgument(Action action)
+{
+    try
+    {
+        action();
+    }
+    catch (ArgumentException)
+    {
+        return;
+    }
+
+    throw new InvalidOperationException("Expected ArgumentException.");
 }
 
 static void True(bool value)

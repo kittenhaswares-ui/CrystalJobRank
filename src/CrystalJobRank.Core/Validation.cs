@@ -1,22 +1,74 @@
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace CrystalJobRank.Core;
 
 public static partial class Validation
 {
-    [GeneratedRegex("^[\\p{L}\\p{N} _.'-]+$", RegexOptions.CultureInvariant)]
-    private static partial Regex DisplayNamePattern();
+    [GeneratedRegex("^[\\p{L}\\p{M}'-]+ [\\p{L}\\p{M}'-]+$", RegexOptions.CultureInvariant)]
+    private static partial Regex CharacterNamePattern();
 
-    public static string NormalizeDisplayName(string value)
+    [GeneratedRegex("^[\\p{L}\\p{M}\\p{N}' -]+$", RegexOptions.CultureInvariant)]
+    private static partial Regex WorldNamePattern();
+
+    public static string NormalizeCharacterName(string value)
     {
-        var normalized = value.Trim();
-        if (normalized.Length is < 2 or > 24 || !DisplayNamePattern().IsMatch(normalized))
+        var source = value ?? string.Empty;
+        if (source.Any(char.IsControl))
         {
-            throw new ArgumentException("Display name must contain 2-24 letters, numbers, spaces, or ._'-." );
+            throw new ArgumentException("Character name must not contain control characters.", nameof(value));
+        }
+
+        var normalized = string.Join(
+            ' ',
+            source.Trim().Normalize(NormalizationForm.FormC)
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        if (normalized.Length is < 3 or > 42 || !CharacterNamePattern().IsMatch(normalized))
+        {
+            throw new ArgumentException(
+                "Character name must contain exactly two name parts and 3-42 letters, apostrophes, or hyphens.",
+                nameof(value));
         }
 
         return normalized;
     }
+
+    public static string NormalizeWorldName(string value)
+    {
+        var source = value ?? string.Empty;
+        if (source.Any(char.IsControl))
+        {
+            throw new ArgumentException("World name must not contain control characters.", nameof(value));
+        }
+
+        var normalized = source.Trim().Normalize(NormalizationForm.FormC);
+        if (normalized.Length is < 1 or > 32 || !WorldNamePattern().IsMatch(normalized))
+        {
+            throw new ArgumentException(
+                "World name must contain 1-32 letters, numbers, spaces, apostrophes, or hyphens.",
+                nameof(value));
+        }
+
+        return normalized;
+    }
+
+    public static uint ValidateWorldId(uint worldId)
+    {
+        if (worldId is 0 or > ushort.MaxValue)
+        {
+            throw new ArgumentException("World ID must be between 1 and 65535.", nameof(worldId));
+        }
+
+        return worldId;
+    }
+
+    public static RegisterRequest NormalizeRegistration(
+        string characterName,
+        uint worldId,
+        string worldName) => new(
+            NormalizeCharacterName(characterName),
+            ValidateWorldId(worldId),
+            NormalizeWorldName(worldName));
 
     public static void ValidateSubmission(MatchSubmission submission)
     {

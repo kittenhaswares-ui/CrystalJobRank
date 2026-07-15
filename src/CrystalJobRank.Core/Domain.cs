@@ -91,13 +91,17 @@ public sealed record MatchSubmission(
     ushort DurationSeconds,
     ScoreboardStats Stats);
 
-public sealed record RegisterRequest(string DisplayName);
+public sealed record RegisterRequest(
+    string CharacterName,
+    uint WorldId,
+    string WorldName);
 
 public sealed record RegistrationResponse(Guid PlayerId, string ApiKey);
 
 public sealed record LeaderboardRow(
     int Rank,
-    string DisplayName,
+    string CharacterName,
+    string WorldName,
     CombatJob Job,
     int Rating,
     int Matches,

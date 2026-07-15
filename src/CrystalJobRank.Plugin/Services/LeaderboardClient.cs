@@ -25,13 +25,16 @@ internal sealed class LeaderboardClient : IDisposable
 
     public async Task<RegistrationResponse> RegisterAsync(
         string baseUrl,
-        string displayName,
+        string characterName,
+        uint worldId,
+        string worldName,
         CancellationToken cancellationToken = default)
     {
         var endpoint = BuildUri(baseUrl, "v1/players/register");
+        var registration = Validation.NormalizeRegistration(characterName, worldId, worldName);
         using var response = await httpClient.PostAsJsonAsync(
             endpoint,
-            new RegisterRequest(Validation.NormalizeDisplayName(displayName)),
+            registration,
             cancellationToken);
         await EnsureSuccessAsync(response, cancellationToken);
         return await response.Content.ReadFromJsonAsync<RegistrationResponse>(cancellationToken)

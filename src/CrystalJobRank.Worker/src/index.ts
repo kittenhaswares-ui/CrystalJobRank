@@ -1,13 +1,15 @@
 import {
   canonicalSubmission,
+  characterIdentityKey,
   type CombatJob,
-  displayNameKey,
   InputError,
   type MatchSubmission,
-  normalizeDisplayName,
+  normalizeCharacterName,
+  normalizeWorldName,
   parseJobQuery,
   parseLeaderboardLimit,
   parseMatchSubmission,
+  parseWorldId,
   RATING_RULES_VERSION,
 } from "./domain";
 
@@ -35,7 +37,8 @@ interface RatingDbRow {
 }
 
 interface LeaderboardDbRow extends RatingDbRow {
-  display_name: string;
+  character_name: string;
+  world_name: string;
 }
 
 interface MatchLimitRow {
@@ -54,13 +57,13 @@ interface RegistrationLimitRow {
 
 const MAX_JSON_BODY_BYTES = 16 * 1024;
 const API_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-const EXPECTED_SCHEMA_VERSION = 2;
+const EXPECTED_SCHEMA_VERSION = 3;
 const DAILY_JOB_MATCH_LIMIT = 100;
 const SEASON_JOB_MATCH_LIMIT = 5_000;
 const LATE_MATCH_REPLAY_LIMIT = 128;
 const GLOBAL_DAILY_REGISTRATION_LIMIT = 100;
 const HEALTH_CACHE_TTL_SECONDS = 15;
-const HEALTH_CACHE_NAME = "crystal-job-rank-health-v2";
+const HEALTH_CACHE_NAME = "crystal-job-rank-health-v3";
 
 const INSERT_MATCH_SQL = `
   INSERT INTO matches (
@@ -325,14 +328,16 @@ function canonicalHealthCacheKey(request: Request): Request {
 async function register(request: Request, env: Env): Promise<Response> {
   await enforceRateLimit(env.REGISTRATION_RATE_LIMITER, await anonymousRateKey(request, "register"));
   const body = requireObject(await readJson(request));
-  const displayName = normalizeDisplayName(body.displayName);
-  const nameKey = displayNameKey(displayName);
+  const characterName = normalizeCharacterName(body.characterName);
+  const worldId = parseWorldId(body.worldId);
+  const worldName = normalizeWorldName(body.worldName);
+  const identityKey = characterIdentityKey(characterName, worldId);
 
   const existing = await env.DB
     .prepare("SELECT id FROM players WHERE display_name_key = ?1")
-    .bind(nameKey)
+    .bind(identityKey)
     .first<{ id: string }>();
-  if (existing) throw new HttpError(409, "That display name is already registered.");
+  if (existing) throw new HttpError(409, "That character is already registered on this World.");
 
   const now = new Date().toISOString();
   const registrationLimit = await registrationLimitStatus(env.DB, now);
@@ -346,17 +351,18 @@ async function register(request: Request, env: Env): Promise<Response> {
   try {
     await env.DB
       .prepare(
-        `INSERT INTO players (id, display_name, display_name_key, api_key_hash, created_at_utc)
-         VALUES (?1, ?2, ?3, ?4, ?5)`,
+        `INSERT INTO players (
+           id, display_name, display_name_key, world_id, world_name, api_key_hash, created_at_utc
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
       )
-      .bind(playerId, displayName, nameKey, apiKeyHash, now)
+      .bind(playerId, characterName, identityKey, worldId, worldName, apiKeyHash, now)
       .run();
   } catch (error) {
     const raced = await env.DB
       .prepare("SELECT id FROM players WHERE display_name_key = ?1")
-      .bind(nameKey)
+      .bind(identityKey)
       .first<{ id: string }>();
-    if (raced) throw new HttpError(409, "That display name is already registered.");
+    if (raced) throw new HttpError(409, "That character is already registered on this World.");
 
     const racedLimit = await registrationLimitStatus(env.DB, now);
     if (racedLimit.daily_count >= GLOBAL_DAILY_REGISTRATION_LIMIT) {
@@ -514,12 +520,19 @@ async function leaderboard(request: Request, url: URL, env: Env): Promise<Respon
   const limit = parseLeaderboardLimit(url.searchParams.get("limit"));
   const result = await env.DB
     .prepare(
-      `SELECT p.display_name, r.rating, r.matches, r.wins, r.losses
+      `SELECT
+         p.display_name AS character_name, p.world_name,
+         r.rating, r.matches, r.wins, r.losses
        FROM ratings r
        JOIN players p ON p.id = r.player_id
        JOIN app_settings settings ON settings.id = 1 AND settings.current_season = r.season_id
        WHERE r.job = ?1 AND r.matches > 0
-       ORDER BY r.rating DESC, r.matches DESC, p.display_name COLLATE NOCASE, p.id
+       ORDER BY
+         r.rating DESC, r.matches DESC,
+         p.display_name COLLATE NOCASE,
+         p.world_name COLLATE NOCASE,
+         p.world_id,
+         p.id
        LIMIT ?2`,
     )
     .bind(job, limit)
@@ -527,7 +540,8 @@ async function leaderboard(request: Request, url: URL, env: Env): Promise<Respon
 
   const rows = result.results.map((row, index) => ({
     rank: index + 1,
-    displayName: row.display_name,
+    characterName: row.character_name,
+    worldName: row.world_name,
     job,
     rating: row.rating,
     matches: row.matches,

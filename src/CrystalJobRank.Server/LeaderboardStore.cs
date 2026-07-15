@@ -7,7 +7,7 @@ namespace CrystalJobRank.Server;
 
 public sealed class LeaderboardStore
 {
-    private const int CurrentSchemaVersion = 3;
+    private const int CurrentSchemaVersion = 4;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -28,11 +28,20 @@ public sealed class LeaderboardStore
         var changed = false;
         if (data.Version < CurrentSchemaVersion)
         {
-            // Version 3 begins a one-time fresh community season while preserving
-            // prior submissions as season-zero history.
-            data.CurrentSeason = 1;
+            // Version 4 replaces unverified aliases with a character + Home World
+            // identity. Legacy accounts cannot be authenticated as that identity,
+            // so discard them and their submissions once instead of mislabeling them.
+            var removedPlayers = data.Players.Count;
+            var removedMatches = data.Matches.Count;
+            data.Players.Clear();
+            data.Matches.Clear();
+            data.CurrentSeason = Math.Max(1, data.CurrentSeason);
             data.Version = CurrentSchemaVersion;
             changed = true;
+            log.LogInformation(
+                "Migrated leaderboard identity schema; removed {Players} legacy alias accounts and {Matches} submissions.",
+                removedPlayers,
+                removedMatches);
         }
 
         if (data.RatingRulesVersion != RatingEngine.RulesVersion)
@@ -44,14 +53,16 @@ public sealed class LeaderboardStore
         if (changed) SaveLocked();
     }
 
-    public RegistrationResponse Register(string requestedDisplayName)
+    public RegistrationResponse Register(string characterName, uint worldId, string worldName)
     {
-        var displayName = Validation.NormalizeDisplayName(requestedDisplayName);
+        var identity = Validation.NormalizeRegistration(characterName, worldId, worldName);
         lock (gate)
         {
-            if (data.Players.Any(x => string.Equals(x.DisplayName, displayName, StringComparison.OrdinalIgnoreCase)))
+            if (data.Players.Any(x =>
+                    x.WorldId == identity.WorldId &&
+                    string.Equals(x.CharacterName, identity.CharacterName, StringComparison.OrdinalIgnoreCase)))
             {
-                throw new DuplicateDisplayNameException("That display name is already registered.");
+                throw new DuplicateCharacterException("That character and Home World are already registered.");
             }
 
             var apiKeyBytes = RandomNumberGenerator.GetBytes(32);
@@ -59,7 +70,9 @@ public sealed class LeaderboardStore
             var player = new PlayerAccount
             {
                 Id = Guid.NewGuid(),
-                DisplayName = displayName,
+                CharacterName = identity.CharacterName,
+                WorldId = identity.WorldId,
+                WorldName = identity.WorldName,
                 ApiKeyHash = HashKey(apiKey),
                 CreatedAtUtc = DateTime.UtcNow,
             };
@@ -117,11 +130,13 @@ public sealed class LeaderboardStore
                 .Where(x => x.Rating.Matches > 0)
                 .OrderByDescending(x => x.Rating.Rating)
                 .ThenByDescending(x => x.Rating.Matches)
-                .ThenBy(x => x.Player.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(x => x.Player.CharacterName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(x => x.Player.WorldId)
                 .Take(limit)
                 .Select((x, index) => new LeaderboardRow(
                     index + 1,
-                    x.Player.DisplayName,
+                    x.Player.CharacterName,
+                    x.Player.WorldName,
                     job,
                     x.Rating.Rating,
                     x.Rating.Matches,
@@ -211,12 +226,12 @@ public sealed class LeaderboardStore
     private static string Base64Url(byte[] value) => Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 }
 
-public sealed class DuplicateDisplayNameException(string message) : Exception(message);
+public sealed class DuplicateCharacterException(string message) : Exception(message);
 public sealed class DuplicateMatchException(string message) : Exception(message);
 
 public sealed class ServerData
 {
-    public int Version { get; set; } = 3;
+    public int Version { get; set; } = 4;
     public int RatingRulesVersion { get; set; } = RatingEngine.RulesVersion;
     public int CurrentSeason { get; set; } = 1;
     public List<PlayerAccount> Players { get; set; } = [];
@@ -226,7 +241,9 @@ public sealed class ServerData
 public sealed class PlayerAccount
 {
     public Guid Id { get; set; }
-    public string DisplayName { get; set; } = string.Empty;
+    public string CharacterName { get; set; } = string.Empty;
+    public uint WorldId { get; set; }
+    public string WorldName { get; set; } = string.Empty;
     public string ApiKeyHash { get; set; } = string.Empty;
     public DateTime CreatedAtUtc { get; set; }
 }

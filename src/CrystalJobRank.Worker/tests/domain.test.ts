@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   applyRating,
   canonicalSubmission,
-  displayNameKey,
+  characterIdentityKey,
   JOBS,
-  normalizeDisplayName,
+  normalizeCharacterName,
+  normalizeWorldName,
   parseJobQuery,
   parseLeaderboardLimit,
   parseMatchSubmission,
+  parseWorldId,
   replayRating,
   replayRatingEvents,
 } from "../src/domain";
@@ -58,10 +60,27 @@ describe("API input contract", () => {
     expect(() => parseLeaderboardLimit("-1")).toThrow(/integer/);
   });
 
-  it("normalizes Unicode display names into a stable unique key", () => {
-    const composed = normalizeDisplayName("  E\u0301owyn  ");
-    expect(composed).toBe("Éowyn");
-    expect(displayNameKey(composed)).toBe(displayNameKey("ÉOWYN"));
+  it("normalizes official character identity into a stable name-and-World key", () => {
+    const characterName = normalizeCharacterName("  E\u0301owyn   Night  ");
+    expect(characterName).toBe("Éowyn Night");
+    expect(characterIdentityKey(characterName, 21)).toBe(characterIdentityKey("ÉOWYN NIGHT", 21));
+    expect(characterIdentityKey(characterName, 21)).not.toBe(characterIdentityKey(characterName, 22));
+    expect(normalizeWorldName("  Ravana  ")).toBe("Ravana");
+    expect(parseWorldId(21)).toBe(21);
+  });
+
+  it("rejects aliases, controls, and invalid World metadata", () => {
+    expect(() => normalizeCharacterName("SingleAlias")).toThrow(/exactly two/);
+    expect(() => normalizeCharacterName("One Two Three")).toThrow(/exactly two/);
+    expect(() => normalizeCharacterName("Valid 😺")).toThrow(/letters/);
+    expect(() => normalizeCharacterName("First\nLast")).toThrow(/control/);
+    expect(() => normalizeCharacterName(`${"A".repeat(21)} ${"B".repeat(21)}`)).toThrow(/3-42/);
+    expect(() => normalizeWorldName("\tRavana")).toThrow(/control/);
+    expect(() => normalizeWorldName(" ")).toThrow(/1-32/);
+    expect(() => parseWorldId(0)).toThrow(/1 and 65535/);
+    expect(() => parseWorldId(65_536)).toThrow(/1 and 65535/);
+    expect(() => parseWorldId(21.5)).toThrow(/1 and 65535/);
+    expect(() => parseWorldId("21")).toThrow(/1 and 65535/);
   });
 
   it("accepts the plugin JSON shape and canonicalizes UTC precision", () => {

@@ -17,6 +17,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ICommandManager commandManager;
     private readonly IChatGui chatGui;
     private readonly IPluginLog log;
+    private readonly IClientState clientState;
+    private readonly IPlayerState playerState;
     private readonly WindowSystem windowSystem = new("CrystalJobRank");
     private readonly MatchStore matchStore;
     private readonly LeaderboardClient leaderboardClient;
@@ -43,6 +45,8 @@ public sealed class Plugin : IDalamudPlugin
         this.commandManager = commandManager;
         this.chatGui = chatGui;
         this.log = log;
+        this.clientState = clientState;
+        this.playerState = playerState;
 
         Configuration = pluginInterface.GetPluginConfig() as PluginConfiguration ?? new PluginConfiguration();
         Configuration.Initialize(pluginInterface);
@@ -57,15 +61,21 @@ public sealed class Plugin : IDalamudPlugin
             matchStore,
             leaderboardClient,
             leaderboardOutbox,
+            clientState,
+            playerState,
             textureProvider,
             SaveConfiguration);
         leaderboardOutbox.StatusChanged += OnLeaderboardStatusChanged;
-        leaderboardOutbox.UpdateState(
-            Configuration.ServerBaseUrl,
-            Configuration.PlayerId,
-            Configuration.ApiKey,
-            Configuration.ShareLeaderboard);
-        if (matchStore.AppliedOneTimeUpdateReset)
+        clientState.Login += OnClientLogin;
+        clientState.Logout += OnClientLogout;
+        UpdateLeaderboardOutboxState();
+        if (Configuration.ClearedLegacyLeaderboardIdentity)
+        {
+            mainWindow.SetStatus(
+                "Leaderboard identities now use the logged-in character and Home World. " +
+                "The old alias credentials and pending uploads were removed; register again when ready.");
+        }
+        else if (matchStore.AppliedOneTimeUpdateReset)
         {
             mainWindow.SetStatus("New season: all local job ratings reset once to 1500. Match history, records, and badges were kept.");
         }
@@ -99,6 +109,8 @@ public sealed class Plugin : IDalamudPlugin
         commandManager.RemoveHandler(Command);
         capture.MatchCaptured -= OnMatchCaptured;
         capture.Dispose();
+        clientState.Login -= OnClientLogin;
+        clientState.Logout -= OnClientLogout;
         leaderboardOutbox.StatusChanged -= OnLeaderboardStatusChanged;
         leaderboardOutbox.Dispose();
         leaderboardClient.Dispose();
@@ -219,6 +231,7 @@ public sealed class Plugin : IDalamudPlugin
                 saved.RatingAfter,
                 saved.RatingDelta);
 
+            UpdateLeaderboardOutboxState();
             leaderboardOutbox.Enqueue(saved.Id);
         }
         catch (Exception exception)
@@ -231,5 +244,30 @@ public sealed class Plugin : IDalamudPlugin
     private void OnLeaderboardStatusChanged(string message, bool isError)
     {
         if (!disposed) mainWindow.SetStatus(message, isError);
+    }
+
+    private void OnClientLogin() => UpdateLeaderboardOutboxState();
+
+    private void OnClientLogout(int _, int __)
+    {
+        if (disposed) return;
+        leaderboardOutbox.UpdateState(
+            Configuration.ServerBaseUrl,
+            Configuration.IsRegistered ? Configuration.PlayerId : null,
+            Configuration.IsRegistered ? Configuration.ApiKey : string.Empty,
+            false);
+    }
+
+    private void UpdateLeaderboardOutboxState()
+    {
+        if (disposed) return;
+        var identityMatches =
+            LocalCharacterIdentityReader.TryRead(clientState, playerState, out var identity, out _) &&
+            Configuration.MatchesRegisteredIdentity(identity.CharacterName, identity.WorldId);
+        leaderboardOutbox.UpdateState(
+            Configuration.ServerBaseUrl,
+            Configuration.IsRegistered ? Configuration.PlayerId : null,
+            Configuration.IsRegistered ? Configuration.ApiKey : string.Empty,
+            Configuration.ShareLeaderboard && identityMatches);
     }
 }

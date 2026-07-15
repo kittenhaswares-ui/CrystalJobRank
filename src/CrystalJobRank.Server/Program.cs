@@ -41,9 +41,9 @@ app.MapPost("/v1/players/register", (RegisterRequest request, LeaderboardStore s
 {
     try
     {
-        return Results.Ok(store.Register(request.DisplayName));
+        return Results.Ok(store.Register(request.CharacterName, request.WorldId, request.WorldName));
     }
-    catch (DuplicateDisplayNameException exception)
+    catch (DuplicateCharacterException exception)
     {
         return Results.Conflict(new { error = exception.Message });
     }

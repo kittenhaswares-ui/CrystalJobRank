@@ -17,12 +17,15 @@ reduce operations work, but they are still a backend service in this design.
 3. The full scoreboard is stored locally in `matches.json`.
 4. The rating engine replays Casual and Ranked wins/losses, independently for
    each job and local rating epoch.
-5. If the user explicitly opts in, the plugin submits only the local player's
-   match fields to the configured HTTPS API.
-6. The server validates the event and recomputes rating itself.
+5. If the user explicitly joins, the plugin registers the currently logged-in
+   character's full name and Home World from Dalamud.
+6. If sharing is enabled, the plugin submits only that character's own future
+   Casual and Ranked match fields to the configured HTTPS API.
+7. The server validates the event and recomputes rating itself.
 
 The plugin never uploads other players' names, worlds, content IDs, account IDs,
-or scoreboard rows.
+or scoreboard rows. Public per-job responses contain the registered character
+name and Home World plus rank, rating, matches, wins, losses, and win rate.
 
 Local aggregation also derives persistent per-job personal records and
 role-specific streak progress from the same ordered match history. These values
@@ -106,9 +109,13 @@ abbreviation for that frame.
 
 ## Authentication and abuse
 
-Registration creates a random 256-bit API key. The server stores only its
-SHA-256 hash and returns the key once. Match deltas sent by clients are ignored;
-the server replays outcomes and de-duplicates fingerprints per account.
+Registration sends `characterName`, `worldId`, and `worldName` for the character
+currently logged in through Dalamud, then creates a random 256-bit API key. The
+server stores only the key's SHA-256 hash and returns the key once. Character
+name plus Home World ID form the unique public identity; leaderboard responses
+return the character and readable Home World as separate fields. Match deltas
+sent by clients are ignored; the server replays outcomes and de-duplicates
+fingerprints per account.
 
 This is not cheat-proof. The plugin and protocol are open source, so a modified
 client can fabricate wins. No client-side secret or signature can solve that.
@@ -131,16 +138,18 @@ leave a match without its corresponding rating state.
 
 The hosted reference deployment uses
 `https://crystal-job-rank-api.kittenhaswares.workers.dev` as its API base URL.
-Plugin configuration version 2 makes this the default and migrates only the
-exact former placeholder URL; custom deployments and existing account settings
-remain unchanged.
+The first update to version 0.5 clears older leaderboard credentials and their
+pending upload queue once, then requires the player to join again with the
+current FFXIV character and Home World. This migration preserves local ratings,
+match history, records, and achievements.
 
 The production D1 database is created with the EU jurisdiction setting. The
-Worker stores only the chosen alias, authentication hash, rating state, and the
-minimum match fields needed for ordering and de-duplication. Territory,
-duration, and raw scoreboard values are validated in transit but discarded; a
-SHA-256 digest of the complete validated submission is retained to distinguish
-an exact retry from conflicting data.
+Worker stores the registered character name, Home World ID and name,
+authentication hash, rating state, and the minimum match fields needed for
+ordering and de-duplication. Territory, duration, and raw personal scoreboard
+values are validated in transit but discarded; a SHA-256 digest of the complete
+validated submission is retained to distinguish an exact retry from conflicting
+data.
 
 The plugin persists failed uploads as a bounded, identity-bound FIFO of local
 match IDs. It sends strictly from the head, uses capped exponential backoff,
@@ -158,8 +167,8 @@ Public deployment requirements:
 
 - expose only the final HTTPS Worker hostname to plugins and never follow
   authentication redirects;
-- keep Worker observability free of request bodies, aliases, fingerprints,
-  addresses, and API keys;
+- keep Worker observability free of request bodies, character names,
+  fingerprints, addresses, and API keys;
 - apply reviewed D1 migrations before deploying matching Worker code;
 - retain database uniqueness constraints even when edge rate limits are used;
 - publish retention and deletion behavior, including D1 Time Travel recovery
