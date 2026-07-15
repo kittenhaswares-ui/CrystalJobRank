@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using CrystalJobRank.Core;
 using CrystalJobRank.Plugin.Infrastructure;
@@ -24,7 +25,9 @@ internal sealed class CrystallineConflictCapture : IDisposable
     private readonly IPlayerState playerState;
     private readonly IObjectTable objectTable;
     private readonly IDataManager dataManager;
+    private readonly IFramework framework;
     private readonly IPluginLog log;
+    private readonly ConcurrentQueue<MatchRecord> pendingRecords = new();
     private volatile bool disposed;
 
     public event Action<MatchRecord>? MatchCaptured;
@@ -34,6 +37,7 @@ internal sealed class CrystallineConflictCapture : IDisposable
         IPlayerState playerState,
         IObjectTable objectTable,
         IDataManager dataManager,
+        IFramework framework,
         IGameInteropProvider interopProvider,
         IPluginLog log)
     {
@@ -41,9 +45,11 @@ internal sealed class CrystallineConflictCapture : IDisposable
         this.playerState = playerState;
         this.objectTable = objectTable;
         this.dataManager = dataManager;
+        this.framework = framework;
         this.log = log;
 
         interopProvider.InitializeFromAttributes(this);
+        framework.Update += OnFrameworkUpdate;
         matchEndHook.Enable();
         log.Information("Crystal Job Rank post-match capture initialized at {Address:X}.", matchEndHook.Address);
     }
@@ -51,23 +57,18 @@ internal sealed class CrystallineConflictCapture : IDisposable
     public void Dispose()
     {
         disposed = true;
+        framework.Update -= OnFrameworkUpdate;
         matchEndHook.Dispose();
     }
 
     private unsafe void OnMatchEnd(nint director, nint results, nint value, uint unknown)
     {
+        MatchRecord? record = null;
         try
         {
             if (results == nint.Zero) return;
             var packet = *(CrystallineConflictResultsPacket*)results;
-            var record = Parse(packet);
-            if (record is not null)
-            {
-                _ = Task.Run(() =>
-                {
-                    if (!disposed) MatchCaptured?.Invoke(record);
-                });
-            }
+            record = Parse(packet);
         }
         catch (Exception exception)
         {
@@ -76,6 +77,22 @@ internal sealed class CrystallineConflictCapture : IDisposable
         finally
         {
             matchEndHook.Original(director, results, value, unknown);
+            if (record is not null && !disposed) pendingRecords.Enqueue(record);
+        }
+    }
+
+    private void OnFrameworkUpdate(IFramework _)
+    {
+        while (!disposed && pendingRecords.TryDequeue(out var record))
+        {
+            try
+            {
+                MatchCaptured?.Invoke(record);
+            }
+            catch (Exception exception)
+            {
+                log.Error(exception, "A captured Crystalline Conflict match could not be handed to the plugin.");
+            }
         }
     }
 
@@ -107,6 +124,7 @@ internal sealed class CrystallineConflictCapture : IDisposable
                 new PlayerScoreboardRow
                 {
                     Name = name,
+                    WorldId = player.WorldId,
                     World = world,
                     Job = job,
                     Team = player.Team,
@@ -144,9 +162,13 @@ internal sealed class CrystallineConflictCapture : IDisposable
         return new MatchRecord
         {
             CompletedAtUtc = DateTime.UtcNow,
+            CharacterName = Validation.NormalizeCharacterName(local.Row.Name),
+            WorldId = Validation.ValidateWorldId(local.Row.WorldId),
+            WorldName = Validation.NormalizeWorldName(local.Row.World),
             LocalJob = local.Row.Job,
             Outcome = packet.Result == 1 ? MatchOutcome.Win : MatchOutcome.Loss,
             Queue = MatchMetadata.Queue(dutyId),
+            ContentFinderConditionId = dutyId,
             TerritoryId = territoryId,
             Arena = MatchMetadata.ArenaName(territoryId),
             DurationSeconds = packet.MatchLength,
@@ -167,4 +189,3 @@ internal sealed class CrystallineConflictCapture : IDisposable
         }
     }
 }
-

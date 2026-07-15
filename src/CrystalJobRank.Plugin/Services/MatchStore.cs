@@ -24,7 +24,9 @@ internal sealed class MatchStore
         this.log = log;
         filePath = Path.Combine(configDirectory, "matches.json");
         data = Load();
-        AppliedOneTimeUpdateReset = data.Version < PluginDataMigrations.CurrentSchemaVersion;
+        // Schema 5 only changes the local epoch key shape. The advertised season
+        // reset belongs exclusively to the v4 rules update and must not repeat.
+        AppliedOneTimeUpdateReset = data.Version < 4;
         if (PluginDataMigrations.Apply(data)) SaveLocked();
     }
 
@@ -36,7 +38,7 @@ internal sealed class MatchStore
         }
     }
 
-    public MatchSubmission? FindSubmission(Guid matchId)
+    public LeaderboardMatchSubmission? FindSubmission(Guid matchId)
     {
         lock (gate)
         {
@@ -48,16 +50,24 @@ internal sealed class MatchStore
     {
         lock (gate)
         {
-            var events = data.Matches
+            var latestIdentity = data.Matches
+                .OrderByDescending(match => match.CompletedAtUtc)
+                .FirstOrDefault(HasAutomaticIdentity);
+            if (latestIdentity is null) return [];
+
+            var characterMatches = data.Matches
+                .Where(match => SameIdentity(match, latestIdentity))
+                .ToArray();
+            var events = characterMatches
                 .OrderBy(x => x.CompletedAtUtc)
                 .ThenBy(x => x.Id)
                 .Select(ToRatingEvent)
                 .ToArray();
-            return data.Matches
+            return characterMatches
                 .Where(x => CombatJobs.All.Contains(x.LocalJob))
                 .Select(x => x.LocalJob)
                 .Distinct()
-                .Select(job => RatingEngine.ReplayEpoch(job, CurrentEpochLocked(job), events))
+                .Select(job => RatingEngine.ReplayEpoch(job, CurrentEpochLocked(latestIdentity, job), events))
                 .OrderByDescending(x => x.Rating)
                 .ThenByDescending(x => x.Matches)
                 .ToArray();
@@ -68,7 +78,38 @@ internal sealed class MatchStore
     {
         lock (gate)
         {
-            return data.LifetimeByJob.ToDictionary(pair => pair.Key, pair => pair.Value.Copy());
+            var result = data.LifetimeByJob.ToDictionary(pair => pair.Key, pair => pair.Value.Copy());
+            var latestIdentity = data.Matches
+                .OrderByDescending(match => match.CompletedAtUtc)
+                .FirstOrDefault(HasAutomaticIdentity);
+            if (latestIdentity is null) return result;
+
+            // The displayed rating peak follows the same character+world scope as
+            // Ratings(). Combat records remain historical, while rating never leaks
+            // from another character played on this installation.
+            foreach (var stats in result.Values) stats.HighestRating = RatingEngine.InitialRating;
+            foreach (var match in data.Matches.Where(match =>
+                         SameIdentity(match, latestIdentity) &&
+                         RatingEngine.IsRatedQueue(match.Queue) &&
+                         match.RatingEpoch == CurrentEpochLocked(latestIdentity, match.LocalJob)))
+            {
+                if (!result.TryGetValue(match.LocalJob, out var stats))
+                {
+                    stats = new JobLifetimeStats();
+                    result[match.LocalJob] = stats;
+                }
+
+                if (match.RatingBefore is >= RatingEngine.MinimumRating and <= RatingEngine.MaximumRating)
+                {
+                    stats.HighestRating = Math.Max(stats.HighestRating, match.RatingBefore);
+                }
+                if (match.RatingAfter is >= RatingEngine.MinimumRating and <= RatingEngine.MaximumRating)
+                {
+                    stats.HighestRating = Math.Max(stats.HighestRating, match.RatingAfter);
+                }
+            }
+
+            return result;
         }
     }
 
@@ -90,15 +131,36 @@ internal sealed class MatchStore
     {
         lock (gate)
         {
-            var previousEpochs = new Dictionary<CombatJob, int>(data.CurrentRatingEpochs);
-            if (!RatingEpochs.TryReset(data.CurrentRatingEpochs, data.Matches.Select(ToRatingEvent), job)) return false;
+            if (!CombatJobs.All.Contains(job))
+            {
+                throw new ArgumentException("A valid combat job is required.", nameof(job));
+            }
+
+            var identity = LatestIdentityLocked();
+            if (identity is null) return false;
+            var current = CurrentEpochLocked(identity, job);
+            if (!data.Matches.Any(match =>
+                    SameIdentity(match, identity) &&
+                    match.LocalJob == job &&
+                    RatingEngine.IsRatedQueue(match.Queue) &&
+                    match.RatingEpoch == current))
+            {
+                return false;
+            }
+
+            var previousEpochs = new Dictionary<string, int>(data.CurrentCharacterRatingEpochs);
+            CharacterRatingEpochs.Advance(
+                data.CurrentCharacterRatingEpochs,
+                identity.CharacterName,
+                identity.WorldId,
+                job);
             try
             {
                 SaveLocked();
             }
             catch
             {
-                data.CurrentRatingEpochs = previousEpochs;
+                data.CurrentCharacterRatingEpochs = previousEpochs;
                 throw;
             }
             return true;
@@ -109,16 +171,38 @@ internal sealed class MatchStore
     {
         lock (gate)
         {
-            var previousEpochs = new Dictionary<CombatJob, int>(data.CurrentRatingEpochs);
-            var jobs = RatingEpochs.ResetAll(data.CurrentRatingEpochs, data.Matches.Select(ToRatingEvent));
-            if (jobs.Count == 0) return jobs;
+            var identity = LatestIdentityLocked();
+            if (identity is null) return [];
+            var jobs = CombatJobs.All
+                .Where(job =>
+                {
+                    var current = CurrentEpochLocked(identity, job);
+                    return data.Matches.Any(match =>
+                        SameIdentity(match, identity) &&
+                        match.LocalJob == job &&
+                        RatingEngine.IsRatedQueue(match.Queue) &&
+                        match.RatingEpoch == current);
+                })
+                .OrderBy(job => job)
+                .ToArray();
+            if (jobs.Length == 0) return jobs;
+
+            var previousEpochs = new Dictionary<string, int>(data.CurrentCharacterRatingEpochs);
+            foreach (var job in jobs)
+            {
+                CharacterRatingEpochs.Advance(
+                    data.CurrentCharacterRatingEpochs,
+                    identity.CharacterName,
+                    identity.WorldId,
+                    job);
+            }
             try
             {
                 SaveLocked();
             }
             catch
             {
-                data.CurrentRatingEpochs = previousEpochs;
+                data.CurrentCharacterRatingEpochs = previousEpochs;
                 throw;
             }
             return jobs;
@@ -142,8 +226,16 @@ internal sealed class MatchStore
                 throw new ArgumentException("Match duration is outside the accepted range.", nameof(record));
             }
             Validation.ValidateScoreboardStats(record.LocalStats);
+            var identity = Validation.NormalizeCharacterIdentity(
+                record.CharacterName,
+                record.WorldId,
+                record.WorldName);
+            record.CharacterName = identity.CharacterName;
+            record.WorldId = identity.WorldId;
+            record.WorldName = identity.WorldName;
 
             var isDuplicate = data.Matches.Any(existing =>
+                SameIdentity(existing, record) &&
                 existing.LocalJob == record.LocalJob &&
                 existing.Outcome == record.Outcome &&
                 existing.Queue == record.Queue &&
@@ -160,7 +252,7 @@ internal sealed class MatchStore
                 return null;
             }
 
-            record.RatingEpoch = CurrentEpochLocked(record.LocalJob);
+            record.RatingEpoch = CurrentEpochLocked(record, record.LocalJob);
             var previousLifetime = data.LifetimeByJob;
             var previousStreaks = data.RoleStreaks;
             var previousRatings = data.Matches
@@ -173,6 +265,11 @@ internal sealed class MatchStore
                 var rebuilt = LifetimeProgressCalculator.Rebuild(data.Matches);
                 data.LifetimeByJob = LifetimeProgressCalculator.MergeLifetime(previousLifetime, rebuilt.LifetimeByJob);
                 data.RoleStreaks = LifetimeProgressCalculator.MergeStreaks(previousStreaks, rebuilt.RoleStreaks);
+                LifetimeProgressCalculator.ApplyCurrentSeasonValues(
+                    data.LifetimeByJob,
+                    data.RoleStreaks,
+                    data.Matches,
+                    data.CurrentCharacterRatingEpochs);
                 SaveLocked();
             }
             catch
@@ -207,13 +304,30 @@ internal sealed class MatchStore
         }
     }
 
-    private int CurrentEpochLocked(CombatJob job) => RatingEpochs.Current(data.CurrentRatingEpochs, job);
+    private int CurrentEpochLocked(MatchRecord identity, CombatJob job) => CharacterRatingEpochs.Current(
+        data.CurrentCharacterRatingEpochs,
+        identity.CharacterName,
+        identity.WorldId,
+        job);
+
+    private MatchRecord? LatestIdentityLocked() => data.Matches
+        .OrderByDescending(match => match.CompletedAtUtc)
+        .FirstOrDefault(HasAutomaticIdentity);
 
     private static RatingEvent ToRatingEvent(MatchRecord match) => new(
         match.LocalJob,
         match.Outcome,
         match.Queue,
         match.RatingEpoch);
+
+    private static bool HasAutomaticIdentity(MatchRecord match) =>
+        !string.IsNullOrWhiteSpace(match.CharacterName) &&
+        match.WorldId is > 0 and <= ushort.MaxValue &&
+        !string.IsNullOrWhiteSpace(match.WorldName);
+
+    private static bool SameIdentity(MatchRecord left, MatchRecord right) =>
+        left.WorldId == right.WorldId &&
+        string.Equals(left.CharacterName, right.CharacterName, StringComparison.OrdinalIgnoreCase);
 
     private void SaveLocked()
     {

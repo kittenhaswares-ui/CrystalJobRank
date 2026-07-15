@@ -62,7 +62,7 @@ public static partial class Validation
         return worldId;
     }
 
-    public static RegisterRequest NormalizeRegistration(
+    public static CharacterIdentity NormalizeCharacterIdentity(
         string characterName,
         uint worldId,
         string worldName) => new(

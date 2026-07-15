@@ -1,12 +1,10 @@
-export const RATING_RULES_VERSION = 3;
+export const RATING_RULES_VERSION = 4;
 export const INITIAL_RATING = 1500;
-export const BASELINE_RATING = 1500;
-export const RATING_SCALE = 2000;
+export const RATING_PRIOR_MATCHES = 40;
+export const RATING_SCALE = 1000;
 export const PROVISIONAL_MATCHES = 10;
-export const PROVISIONAL_K = 64;
-export const ESTABLISHED_K = 32;
-export const MINIMUM_RATING = 0;
-export const MAXIMUM_RATING = 3000;
+export const MINIMUM_RATING = 500;
+export const MAXIMUM_RATING = 2500;
 
 export const JOBS = {
   PLD: 1,
@@ -47,8 +45,11 @@ export interface ScoreboardStats {
 }
 
 export interface MatchSubmission {
-  fingerprint: string;
+  matchKey: string;
   completedAtUtc: string;
+  characterName: string;
+  worldId: number;
+  worldName: string;
   job: CombatJob;
   outcome: MatchOutcome;
   queue: RatedQueue;
@@ -65,12 +66,6 @@ export interface RatingState {
   losses: number;
 }
 
-export interface RatingEvent {
-  completedAtUtc: string;
-  fingerprint: string;
-  outcome: MatchOutcome;
-}
-
 export class InputError extends Error {
   constructor(message: string) {
     super(message);
@@ -80,15 +75,116 @@ export class InputError extends Error {
 
 const CONTROL_CHARACTER_PATTERN = /\p{Cc}/u;
 const CHARACTER_NAME_PATTERN = /^[\p{L}\p{M}'-]+ [\p{L}\p{M}'-]+$/u;
-const WORLD_NAME_PATTERN = /^[\p{L}\p{M}\p{N}' -]+$/u;
 const UTC_TIMESTAMP_PATTERN = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,7}))?Z$/;
 const VALID_JOB_IDS = new Set<number>(Object.values(JOBS));
+
+// Canonical global-service Home Worlds from the game's World sheet. The API
+// derives public presentation data from the numeric row ID and never trusts a
+// caller-provided World label. Historical travel-only Worlds and separately
+// operated regional editions are intentionally excluded.
+const WORLD_NAMES_BY_ID: Readonly<Record<number, string>> = {
+  // Materia
+  21: "Ravana",
+  22: "Bismarck",
+  86: "Sephirot",
+  87: "Sophia",
+  88: "Zurvan",
+  // Mana
+  23: "Asura",
+  28: "Pandaemonium",
+  44: "Anima",
+  47: "Hades",
+  48: "Ixion",
+  61: "Titan",
+  70: "Chocobo",
+  96: "Masamune",
+  // Meteor
+  24: "Belias",
+  29: "Shinryu",
+  30: "Unicorn",
+  31: "Yojimbo",
+  32: "Zeromus",
+  52: "Valefor",
+  60: "Ramuh",
+  82: "Mandragora",
+  // Light
+  33: "Twintania",
+  36: "Lich",
+  42: "Zodiark",
+  56: "Phoenix",
+  66: "Odin",
+  67: "Shiva",
+  402: "Alpha",
+  403: "Raiden",
+  // Crystal
+  34: "Brynhildr",
+  37: "Mateus",
+  41: "Zalera",
+  62: "Diabolos",
+  74: "Coeurl",
+  75: "Malboro",
+  81: "Goblin",
+  91: "Balmung",
+  // Primal
+  35: "Famfrit",
+  53: "Exodus",
+  55: "Lamia",
+  64: "Leviathan",
+  77: "Ultros",
+  78: "Behemoth",
+  93: "Excalibur",
+  95: "Hyperion",
+  // Chaos
+  39: "Omega",
+  71: "Moogle",
+  80: "Cerberus",
+  83: "Louisoix",
+  85: "Spriggan",
+  97: "Ragnarok",
+  400: "Sagittarius",
+  401: "Phantom",
+  // Aether
+  40: "Jenova",
+  54: "Faerie",
+  57: "Siren",
+  63: "Gilgamesh",
+  65: "Midgardsormr",
+  73: "Adamantoise",
+  79: "Cactuar",
+  99: "Sargatanas",
+  // Gaia
+  43: "Alexander",
+  46: "Fenrir",
+  51: "Ultima",
+  59: "Ifrit",
+  69: "Bahamut",
+  76: "Tiamat",
+  92: "Durandal",
+  98: "Ridill",
+  // Elemental
+  45: "Carbuncle",
+  49: "Kujata",
+  50: "Typhon",
+  58: "Garuda",
+  68: "Atomos",
+  72: "Tonberry",
+  90: "Aegis",
+  94: "Gungnir",
+  // Dynamis
+  404: "Marilith",
+  405: "Seraph",
+  406: "Halicarnassus",
+  407: "Maduin",
+  408: "Cuchulainn",
+  409: "Kraken",
+  410: "Rafflesia",
+  411: "Golem",
+};
 
 export function normalizeCharacterName(value: unknown): string {
   if (typeof value !== "string") {
     throw new InputError("Character name must be a string.");
   }
-
   if (CONTROL_CHARACTER_PATTERN.test(value)) {
     throw new InputError("Character name must not contain control characters.");
   }
@@ -101,7 +197,9 @@ export function normalizeCharacterName(value: unknown): string {
     normalized.length > 42 ||
     !CHARACTER_NAME_PATTERN.test(normalized)
   ) {
-    throw new InputError("Character name must contain exactly two name parts and 3-42 letters, apostrophes, or hyphens.");
+    throw new InputError(
+      "Character name must contain exactly two name parts and 3-42 letters, apostrophes, or hyphens.",
+    );
   }
   return normalized;
 }
@@ -110,19 +208,12 @@ export function parseWorldId(value: unknown): number {
   return integerInRange(value, 1, 65_535, "World ID must be an integer between 1 and 65535.");
 }
 
-export function normalizeWorldName(value: unknown): string {
-  if (typeof value !== "string") {
-    throw new InputError("World name must be a string.");
+export function canonicalWorldName(worldId: number): string {
+  const worldName = WORLD_NAMES_BY_ID[worldId];
+  if (!worldName) {
+    throw new InputError("Home World is not supported by this leaderboard version.");
   }
-  if (CONTROL_CHARACTER_PATTERN.test(value)) {
-    throw new InputError("World name must not contain control characters.");
-  }
-
-  const normalized = value.trim().normalize("NFC");
-  if (normalized.length < 1 || normalized.length > 32 || !WORLD_NAME_PATTERN.test(normalized)) {
-    throw new InputError("World name must contain 1-32 letters, numbers, spaces, apostrophes, or hyphens.");
-  }
-  return normalized;
+  return worldName;
 }
 
 export function characterIdentityKey(characterName: string, worldId: number): string {
@@ -144,12 +235,12 @@ export function parseLeaderboardLimit(value: string | null): number {
 
 export function parseMatchSubmission(value: unknown, now = new Date()): MatchSubmission {
   const input = requireObject(value, "Match submission is required.");
-  const fingerprint = requireString(
-    input.fingerprint,
-    "Fingerprint must contain exactly 32 lowercase hexadecimal characters.",
+  const matchKey = requireString(
+    input.matchKey,
+    "Match key must contain exactly 64 lowercase hexadecimal characters.",
   );
-  if (!/^[0-9a-f]{32}$/.test(fingerprint)) {
-    throw new InputError("Fingerprint must contain exactly 32 lowercase hexadecimal characters.");
+  if (!/^[0-9a-f]{64}$/.test(matchKey)) {
+    throw new InputError("Match key must contain exactly 64 lowercase hexadecimal characters.");
   }
 
   const { normalized: completedAtUtc, milliseconds } = normalizeUtcTimestamp(input.completedAtUtc);
@@ -158,6 +249,10 @@ export function parseMatchSubmission(value: unknown, now = new Date()): MatchSub
   if (milliseconds < oldest || milliseconds > newest) {
     throw new InputError("Match timestamp is outside the accepted window.");
   }
+
+  const characterName = normalizeCharacterName(input.characterName);
+  const worldId = parseWorldId(input.worldId);
+  const worldName = canonicalWorldName(worldId);
 
   const job = requireInteger(input.job, "Job is required.");
   if (!VALID_JOB_IDS.has(job)) throw new InputError("Job is required.");
@@ -172,7 +267,12 @@ export function parseMatchSubmission(value: unknown, now = new Date()): MatchSub
     throw new InputError("Only Casual and Ranked matches can affect the community leaderboard.");
   }
 
-  const territoryId = integerInRange(input.territoryId, 0, 65_535, "Territory ID is outside the accepted range.");
+  const territoryId = integerInRange(
+    input.territoryId,
+    0,
+    65_535,
+    "Territory ID is outside the accepted range.",
+  );
   const durationSeconds = integerInRange(
     input.durationSeconds,
     10,
@@ -211,8 +311,11 @@ export function parseMatchSubmission(value: unknown, now = new Date()): MatchSub
   };
 
   return {
-    fingerprint,
+    matchKey,
     completedAtUtc,
+    characterName,
+    worldId,
+    worldName,
     job: job as CombatJob,
     outcome,
     queue,
@@ -222,45 +325,51 @@ export function parseMatchSubmission(value: unknown, now = new Date()): MatchSub
   };
 }
 
+/**
+ * Rules v4 is a Beta(20,20) prior expressed as a symmetric linear score.
+ * It depends only on the season record, so upload order cannot change it.
+ */
+export function ratingFromRecord(wins: number, losses: number): number {
+  if (!Number.isInteger(wins) || !Number.isInteger(losses) || wins < 0 || losses < 0) {
+    throw new InputError("Wins and losses must be non-negative integers.");
+  }
+  const matches = wins + losses;
+  const offset = roundAwayFromZero((RATING_SCALE * (wins - losses)) / (matches + RATING_PRIOR_MATCHES));
+  return Math.min(MAXIMUM_RATING, Math.max(MINIMUM_RATING, INITIAL_RATING + offset));
+}
+
 export function applyRating(state: RatingState, outcome: MatchOutcome): RatingState {
   if (!VALID_JOB_IDS.has(state.job)) throw new InputError("A rating cannot be calculated for an invalid job.");
   if (outcome !== 0 && outcome !== 1) throw new InputError("A valid match outcome is required.");
+  if (state.matches !== state.wins + state.losses) {
+    throw new InputError("Rating counters are inconsistent.");
+  }
 
-  const expected = 1 / (1 + 10 ** ((BASELINE_RATING - state.rating) / RATING_SCALE));
-  const k = state.matches < PROVISIONAL_MATCHES ? PROVISIONAL_K : ESTABLISHED_K;
-  let delta = roundAwayFromZero(k * (outcome - expected));
-  if (delta === 0) delta = outcome === 1 ? 1 : -1;
-
-  const rating = Math.min(MAXIMUM_RATING, Math.max(MINIMUM_RATING, state.rating + delta));
+  const wins = state.wins + (outcome === 1 ? 1 : 0);
+  const losses = state.losses + (outcome === 0 ? 1 : 0);
   return {
     job: state.job,
-    rating,
-    matches: state.matches + 1,
-    wins: state.wins + (outcome === 1 ? 1 : 0),
-    losses: state.losses + (outcome === 0 ? 1 : 0),
+    rating: ratingFromRecord(wins, losses),
+    matches: wins + losses,
+    wins,
+    losses,
   };
 }
 
 export function replayRating(job: CombatJob, outcomes: readonly MatchOutcome[]): RatingState {
-  let state: RatingState = { job, rating: INITIAL_RATING, matches: 0, wins: 0, losses: 0 };
-  for (const outcome of outcomes) state = applyRating(state, outcome);
-  return state;
-}
-
-export function replayRatingEvents(job: CombatJob, events: readonly RatingEvent[]): RatingState {
-  const ordered = [...events].sort(
-    (left, right) =>
-      left.completedAtUtc.localeCompare(right.completedAtUtc) ||
-      compareOrdinal(left.fingerprint, right.fingerprint),
-  );
-  return replayRating(job, ordered.map((event) => event.outcome));
+  const wins = outcomes.reduce<number>((total, outcome) => total + (outcome === 1 ? 1 : 0), 0);
+  const losses = outcomes.length - wins;
+  return { job, rating: ratingFromRecord(wins, losses), matches: outcomes.length, wins, losses };
 }
 
 export function canonicalSubmission(submission: MatchSubmission): string {
   const stats = submission.stats;
   return JSON.stringify([
-    submission.fingerprint,
+    submission.matchKey,
     submission.completedAtUtc,
+    submission.characterName,
+    submission.worldId,
+    submission.worldName,
     submission.job,
     submission.outcome,
     submission.queue,
@@ -296,10 +405,6 @@ function normalizeUtcTimestamp(value: unknown): { normalized: string; millisecon
 
 function roundAwayFromZero(value: number): number {
   return value < 0 ? -Math.round(-value) : Math.round(value);
-}
-
-function compareOrdinal(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {

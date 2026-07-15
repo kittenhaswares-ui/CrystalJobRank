@@ -26,8 +26,6 @@ internal sealed class MainWindow : Window
     private readonly MatchStore matchStore;
     private readonly LeaderboardClient leaderboardClient;
     private readonly LeaderboardOutbox leaderboardOutbox;
-    private readonly IClientState clientState;
-    private readonly IPlayerState playerState;
     private readonly ITextureProvider textureProvider;
     private readonly Action saveConfiguration;
     private readonly object stateGate = new();
@@ -39,18 +37,15 @@ internal sealed class MainWindow : Window
     private CombatJob? leaderboardLoadingJob;
     private string loadedLeaderboardServerBaseUrl = string.Empty;
     private DateTime? leaderboardLoadedAtUtc;
-    private string status = "Ready. New CC result screens will be recorded automatically.";
+    private string status = "Ready. Casual and Ranked CC results are recorded and shared automatically.";
     private bool statusIsError;
     private bool networkBusy;
-    private bool confirmAccountDeletion;
 
     public MainWindow(
         PluginConfiguration configuration,
         MatchStore matchStore,
         LeaderboardClient leaderboardClient,
         LeaderboardOutbox leaderboardOutbox,
-        IClientState clientState,
-        IPlayerState playerState,
         ITextureProvider textureProvider,
         Action saveConfiguration)
         : base("Crystal Job Rank###CrystalJobRankMain")
@@ -59,8 +54,6 @@ internal sealed class MainWindow : Window
         this.matchStore = matchStore;
         this.leaderboardClient = leaderboardClient;
         this.leaderboardOutbox = leaderboardOutbox;
-        this.clientState = clientState;
-        this.playerState = playerState;
         this.textureProvider = textureProvider;
         this.saveConfiguration = saveConfiguration;
         selectedLeaderboardJob = matchStore.Snapshot().FirstOrDefault()?.LocalJob ?? CombatJob.PLD;
@@ -141,7 +134,7 @@ internal sealed class MainWindow : Window
         var currentLosses = ratings.Sum(x => x.Losses);
 
         ImGui.TextColored(new Vector4(0.82f, 0.75f, 1f, 1f), "JOB-SPECIFIC CRYSTAL RATING");
-        ImGui.TextWrapped("Each job climbs independently. Casual and Ranked wins and losses move the rating; Custom and Unknown-queue matches and scoreboard performance never change it.");
+        ImGui.TextWrapped("Each character and job climbs independently. Casual and Ranked wins and losses move the rating; solo and group/premade matches count equally. Custom and Unknown-queue matches and scoreboard performance never change it.");
         ImGui.TextDisabled($"Current rating epochs  •  Matches  {currentMatches}     Wins  {currentWins}     Losses  {currentLosses}");
         ImGui.Spacing();
 
@@ -266,128 +259,48 @@ internal sealed class MainWindow : Window
             currentLeaderboard = leaderboard;
         }
 
-        var hasCurrentIdentity = LocalCharacterIdentityReader.TryRead(
-            clientState,
-            playerState,
-            out var currentIdentity,
-            out var identityUnavailableReason);
-        var currentIdentityMatchesRegistration =
-            hasCurrentIdentity &&
-            configuration.MatchesRegisteredIdentity(currentIdentity.CharacterName, currentIdentity.WorldId);
-        if (!currentNetworkBusy) UpdateOutboxState(currentIdentityMatchesRegistration);
+        var latestMatch = matchStore.Snapshot().FirstOrDefault(match =>
+            !string.IsNullOrWhiteSpace(match.CharacterName) && match.WorldId > 0);
 
-        ImGui.TextColored(new Vector4(0.82f, 0.75f, 1f, 1f), "OPTIONAL COMMUNITY LEADERBOARD");
-        ImGui.TextWrapped("Optional: joining publishes your automatically detected character name, Home World, and per-job leaderboard statistics.");
-        ImGui.TextWrapped("Sharing sends only your own future Casual and Ranked results—never other players' data or Square Enix account IDs. You can stop sharing or delete the online identity at any time.");
+        ImGui.TextColored(new Vector4(0.82f, 0.75f, 1f, 1f), "AUTOMATIC COMMUNITY LEADERBOARD");
+        ImGui.TextWrapped("Every future Casual and Ranked result is shared automatically, including group/premade queues. There is no registration step, checkbox, account rating, or character lock.");
+        ImGui.TextWrapped("The character name and Home World are read from each post-match scoreboard. Each character and each job has a completely separate seasonal rating; changing character switches profiles automatically.");
         ImGui.Spacing();
 
-        ImGui.TextDisabled("CURRENT CHARACTER");
-        if (hasCurrentIdentity)
+        ImGui.TextDisabled("LATEST CAPTURED CHARACTER");
+        if (latestMatch is not null)
         {
-            ImGui.TextColored(new Vector4(0.55f, 0.85f, 1f, 1f), currentIdentity.DisplayLabel);
-            ImGui.TextDisabled("Read automatically from Dalamud. This identity cannot be edited in the plugin.");
+            ImGui.TextColored(
+                new Vector4(0.55f, 0.85f, 1f, 1f),
+                $"{latestMatch.CharacterName} · {latestMatch.WorldName}");
+            ImGui.TextDisabled("Detected from the latest result; it cannot be typed or spoofed through the plugin UI.");
         }
         else
         {
-            ImGui.TextColored(new Vector4(1f, 0.65f, 0.32f, 1f), "No complete logged-in character identity available.");
-            ImGui.TextDisabled(identityUnavailableReason);
+            ImGui.TextDisabled("Finish a Casual or Ranked match to create the first automatic character/job entry.");
         }
+        ImGui.TextColored(new Vector4(0.45f, 0.9f, 0.55f, 1f), "Automatic sharing active");
+        ImGui.SameLine();
+        ImGui.TextDisabled($"• Pending uploads: {leaderboardOutbox.PendingCount} • network failures retry automatically");
         ImGui.Spacing();
 
         var serverUrl = configuration.ServerBaseUrl;
-        if (configuration.IsRegistered || currentNetworkBusy) ImGui.BeginDisabled();
+        if (currentNetworkBusy) ImGui.BeginDisabled();
         if (ImGui.InputText("Server URL (advanced)", ref serverUrl, 256))
         {
             configuration.ServerBaseUrl = serverUrl;
             saveConfiguration();
+            leaderboardOutbox.UpdateState(configuration.ServerBaseUrl, configuration.InstallationKey);
             ClearLeaderboardSnapshot();
         }
-        if (configuration.IsRegistered || currentNetworkBusy) ImGui.EndDisabled();
-        if (configuration.IsRegistered)
-        {
-            ImGui.TextDisabled("The server address is locked while this leaderboard identity exists, so its API key cannot be sent to another host.");
-        }
-        else
-        {
-            ImGui.TextDisabled("A custom server has a different operator and may follow a different privacy policy.");
-        }
+        if (currentNetworkBusy) ImGui.EndDisabled();
+        ImGui.TextDisabled("The installation key is generated and stored invisibly; it is not tied to a character or Square Enix account.");
         var validServerUrl = IsValidServerBaseUrl(configuration.ServerBaseUrl);
         if (!validServerUrl)
         {
             ImGui.TextColored(
                 new Vector4(1f, 0.42f, 0.42f, 1f),
                 "Enter an HTTPS leaderboard URL (HTTP is allowed only for localhost development)." );
-        }
-
-        if (!configuration.IsRegistered)
-        {
-            var canRegister = hasCurrentIdentity && validServerUrl && !currentNetworkBusy;
-            if (!canRegister) ImGui.BeginDisabled();
-            var registerLabel = hasCurrentIdentity
-                ? $"Register {currentIdentity.DisplayLabel}"
-                : "Log in to register";
-            if (ImGui.Button(currentNetworkBusy ? "Please wait..." : registerLabel) && canRegister)
-            {
-                _ = RegisterAsync(currentIdentity);
-            }
-            if (!canRegister) ImGui.EndDisabled();
-            ImGui.SameLine();
-            ImGui.TextDisabled(!hasCurrentIdentity
-                ? "A complete logged-in character and Home World are required."
-                : !validServerUrl
-                    ? "Enter a valid leaderboard server URL first."
-                    : "This publishes the shown character identity; match sharing starts separately below.");
-        }
-        else
-        {
-            ImGui.TextUnformatted($"Registered leaderboard identity: {configuration.RegisteredIdentityLabel}");
-            if (currentIdentityMatchesRegistration)
-            {
-                ImGui.TextColored(new Vector4(0.45f, 0.9f, 0.55f, 1f), "The logged-in character matches this identity.");
-            }
-            else
-            {
-                var currentLabel = hasCurrentIdentity ? currentIdentity.DisplayLabel : "no logged-in character";
-                ImGui.TextColored(
-                    new Vector4(1f, 0.65f, 0.32f, 1f),
-                    $"Sharing is paused: currently {currentLabel}. Switch to {configuration.RegisteredIdentityLabel}.");
-            }
-
-            var share = configuration.ShareLeaderboard;
-            var canChangeSharing = currentIdentityMatchesRegistration || share;
-            if (!canChangeSharing) ImGui.BeginDisabled();
-            if (ImGui.Checkbox("Share future Casual and Ranked results", ref share))
-            {
-                if (!share || currentIdentityMatchesRegistration)
-                {
-                    configuration.ShareLeaderboard = share;
-                    saveConfiguration();
-                    UpdateOutboxState(currentIdentityMatchesRegistration);
-                }
-            }
-            if (!canChangeSharing) ImGui.EndDisabled();
-            ImGui.TextDisabled(currentIdentityMatchesRegistration
-                ? $"Pending uploads: {leaderboardOutbox.PendingCount}. Temporary network and server failures retry automatically."
-                : $"Pending uploads: {leaderboardOutbox.PendingCount}. They remain local and paused until the registered character is active.");
-
-            if (!confirmAccountDeletion)
-            {
-                if (currentNetworkBusy) ImGui.BeginDisabled();
-                if (ImGui.Button("Delete leaderboard account") && !currentNetworkBusy) confirmAccountDeletion = true;
-                if (currentNetworkBusy) ImGui.EndDisabled();
-            }
-            else
-            {
-                ImGui.TextColored(new Vector4(1f, 0.42f, 0.42f, 1f), "This immediately removes the identity and all submitted matches from the active service. Cloudflare recovery backups can retain a copy for up to 7 days.");
-                if (currentNetworkBusy) ImGui.BeginDisabled();
-                if (ImGui.Button(currentNetworkBusy ? "Please wait..." : "Confirm online deletion") && !currentNetworkBusy)
-                {
-                    _ = DeleteAccountAsync();
-                }
-                if (currentNetworkBusy) ImGui.EndDisabled();
-                ImGui.SameLine();
-                if (ImGui.Button("Cancel")) confirmAccountDeletion = false;
-            }
         }
 
         ImGui.Separator();
@@ -472,16 +385,17 @@ internal sealed class MainWindow : Window
         foreach (var row in currentLeaderboard)
         {
             ImGui.TableNextRow();
-            Cell(row.Rank.ToString());
-            var isOwnEntry = configuration.IsRegistered &&
-                string.Equals(row.CharacterName, configuration.RegisteredCharacterName, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(row.WorldName, configuration.RegisteredWorldName, StringComparison.OrdinalIgnoreCase);
+            var provisional = row.Matches < 10;
+            Cell(provisional ? "—" : row.Rank.ToString());
+            var isOwnEntry = latestMatch is not null &&
+                string.Equals(row.CharacterName, latestMatch.CharacterName, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(row.WorldName, latestMatch.WorldName, StringComparison.OrdinalIgnoreCase);
             var publicIdentity = $"{row.CharacterName} · {row.WorldName}";
             Cell(isOwnEntry ? $"{publicIdentity}  (you)" : publicIdentity);
             var band = RankVisuals.GetBand(row.Rating);
-            ColoredCell(band.Name, band.MetalColor);
+            ColoredCell(provisional ? "PROVISIONAL" : band.Name, provisional ? new Vector4(0.7f, 0.7f, 0.76f, 1f) : band.MetalColor);
             Cell(row.Rating.ToString("N0"));
-            Cell(row.Matches.ToString("N0"));
+            Cell(provisional ? $"{row.Matches}/10" : row.Matches.ToString("N0"));
             Cell($"{row.Wins:N0}W  {row.Losses:N0}L");
             Cell($"{row.WinRate:P1}");
         }
@@ -508,39 +422,6 @@ internal sealed class MainWindow : Window
             if (index < jobs.Count - 1) ImGui.SameLine();
         }
         return changed;
-    }
-
-    private async Task RegisterAsync(LocalCharacterIdentity identity)
-    {
-        if (!TryBeginNetworkOperation()) return;
-        SetStatus($"Registering {identity.DisplayLabel}...");
-        try
-        {
-            var registration = await leaderboardClient.RegisterAsync(
-                configuration.ServerBaseUrl,
-                identity.CharacterName,
-                identity.WorldId,
-                identity.WorldName);
-            configuration.SetRegisteredIdentity(
-                registration.PlayerId,
-                registration.ApiKey,
-                identity.CharacterName,
-                identity.WorldId,
-                identity.WorldName);
-            saveConfiguration();
-            UpdateOutboxState(
-                LocalCharacterIdentityReader.TryRead(clientState, playerState, out var current, out _) &&
-                configuration.MatchesRegisteredIdentity(current.CharacterName, current.WorldId));
-            SetStatus($"{identity.DisplayLabel} registered. Enable automatic sharing when ready; no matches were uploaded.");
-        }
-        catch (Exception exception)
-        {
-            SetStatus(exception.Message, true);
-        }
-        finally
-        {
-            EndNetworkOperation();
-        }
     }
 
     private async Task RefreshLeaderboardAsync()
@@ -581,33 +462,6 @@ internal sealed class MainWindow : Window
             {
                 if (leaderboardLoadingJob == requestedJob) leaderboardLoadingJob = null;
             }
-            EndNetworkOperation();
-        }
-    }
-
-    private async Task DeleteAccountAsync()
-    {
-        if (!TryBeginNetworkOperation()) return;
-        SetStatus("Deleting leaderboard identity and submitted matches...");
-        try
-        {
-            await leaderboardOutbox.PauseAsync();
-            await leaderboardClient.DeleteAccountAsync(configuration.ServerBaseUrl, configuration.ApiKey);
-            configuration.ClearRegisteredIdentity();
-            confirmAccountDeletion = false;
-            saveConfiguration();
-            UpdateOutboxState(false);
-            SetStatus("Leaderboard account and active submissions were deleted. Local history was kept; recovery backups expire within 7 days.");
-        }
-        catch (Exception exception)
-        {
-            UpdateOutboxState(
-                LocalCharacterIdentityReader.TryRead(clientState, playerState, out var current, out _) &&
-                configuration.MatchesRegisteredIdentity(current.CharacterName, current.WorldId));
-            SetStatus(exception.Message, true);
-        }
-        finally
-        {
             EndNetworkOperation();
         }
     }
@@ -670,12 +524,6 @@ internal sealed class MainWindow : Window
         return uri.Scheme == Uri.UriSchemeHttps ||
                (uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback);
     }
-
-    private void UpdateOutboxState(bool currentIdentityMatchesRegistration) => leaderboardOutbox.UpdateState(
-        configuration.ServerBaseUrl,
-        configuration.IsRegistered ? configuration.PlayerId : null,
-        configuration.IsRegistered ? configuration.ApiKey : string.Empty,
-        configuration.ShareLeaderboard && currentIdentityMatchesRegistration);
 
     private static void Cell(string value)
     {

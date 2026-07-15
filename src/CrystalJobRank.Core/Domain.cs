@@ -65,6 +65,7 @@ public sealed record RatingState(
     int Losses)
 {
     public double WinRate => Matches == 0 ? 0 : (double)Wins / Matches;
+    public bool IsProvisional => Matches < RatingEngine.ProvisionalMatches;
 }
 
 public sealed record RatingChange(
@@ -73,7 +74,10 @@ public sealed record RatingChange(
     int Delta,
     int MatchesAfter,
     int WinsAfter,
-    int LossesAfter);
+    int LossesAfter)
+{
+    public bool IsProvisionalAfter => MatchesAfter < RatingEngine.ProvisionalMatches;
+}
 
 public sealed record RatingEvent(
     CombatJob Job,
@@ -91,12 +95,10 @@ public sealed record MatchSubmission(
     ushort DurationSeconds,
     ScoreboardStats Stats);
 
-public sealed record RegisterRequest(
+public sealed record CharacterIdentity(
     string CharacterName,
     uint WorldId,
     string WorldName);
-
-public sealed record RegistrationResponse(Guid PlayerId, string ApiKey);
 
 public sealed record LeaderboardRow(
     int Rank,
@@ -107,4 +109,7 @@ public sealed record LeaderboardRow(
     int Matches,
     int Wins,
     int Losses,
-    double WinRate);
+    double WinRate)
+{
+    public bool IsProvisional => Matches < RatingEngine.ProvisionalMatches;
+}

@@ -3,10 +3,20 @@
   "name": "crystal-job-rank-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-15",
+  "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "preview_urls": false,
   "observability": {
-    "enabled": false
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": false
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    }
   },
   "d1_databases": [
     {
@@ -17,14 +27,6 @@
     }
   ],
   "ratelimits": [
-    {
-      "name": "REGISTRATION_RATE_LIMITER",
-      "namespace_id": "7341101",
-      "simple": {
-        "limit": 5,
-        "period": 60
-      }
-    },
     {
       "name": "WRITE_RATE_LIMITER",
       "namespace_id": "7341102",

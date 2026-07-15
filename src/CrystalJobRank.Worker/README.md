@@ -1,23 +1,145 @@
 # CrystalJobRank Cloudflare backend
 
-This directory contains the production API for the optional community leaderboard. It runs on a Cloudflare Worker and uses D1; no permanently running server or paid dependency is required.
+This directory contains the community leaderboard API. It runs on a Cloudflare
+Worker with D1, so no permanently running server is required.
 
 ## Production endpoint
-
-The official Crystal Job Rank release uses:
 
 ```text
 https://crystal-job-rank-api.kittenhaswares.workers.dev
 ```
 
-The public health check is
-`https://crystal-job-rank-api.kittenhaswares.workers.dev/health`. Plugin users
-may configure another HTTPS deployment before creating an identity; that
-deployment has its own operator and privacy policy.
+Health check: `GET /health`.
 
-## Deploy
+## Automatic v2 contract
 
-Prerequisites: Node.js 22 or newer, pnpm 11, and a Cloudflare account with Workers and D1 enabled.
+There is no registration endpoint and no character/account credential. The
+plugin generates one random 32-byte installation secret, persists it locally,
+and sends its 43-character base64url representation in the
+`X-Installation-Key` header. The secret is invisible to the player and never
+locks a character to an installation. One installation may submit different
+characters, and multiple installations may submit the same character. Its hash
+is used only as a transient Cloudflare rate-limit key; neither the secret nor
+its hash is persisted in D1 or attached to a match.
+
+`POST /v2/matches` requires `Content-Type: application/json`, the installation
+header, and this body:
+
+```json
+{
+  "matchKey": "64 lowercase hexadecimal characters",
+  "completedAtUtc": "2026-07-15T10:00:00.0000000Z",
+  "characterName": "Test Dancer",
+  "worldId": 21,
+  "worldName": "Ravana",
+  "job": 17,
+  "outcome": 1,
+  "queue": 1,
+  "territoryId": 1032,
+  "durationSeconds": 300,
+  "stats": {
+    "kills": 3,
+    "deaths": 0,
+    "assists": 5,
+    "damageDealt": 750000,
+    "damageTaken": 500000,
+    "hpRestored": 25000,
+    "timeOnCrystalSeconds": 45
+  }
+}
+```
+
+The first accepted match automatically creates the normalized
+`characterName + worldId` identity and its independent job rating. Casual (`1`)
+and Ranked (`2`) count equally. Solo, group, and premade matches count; the API
+does not apply a party-size condition. Custom and unknown queues are rejected.
+The server maps every supported global-service `worldId` to its canonical Home
+World name; the submitted `worldName` is compatibility input and is never used
+for public data. Unknown World IDs are rejected.
+
+A successful response is:
+
+```json
+{
+  "job": 17,
+  "rating": 1524,
+  "matches": 1,
+  "wins": 1,
+  "losses": 0,
+  "winRate": 1,
+  "isProvisional": true
+}
+```
+
+Public rows come from `GET /v1/leaderboard?job=DNC&limit=50`. Players with
+fewer than ten matches remain visible with `rank: 0` and
+`isProvisional: true`. Established players are numbered first by rating, then
+match count and deterministic character/World tie-breakers.
+
+There is deliberately no mid-season reset or delete endpoint.
+That prevents players from splitting losses across throwaway installation keys.
+A future privacy deletion flow should remove a complete character season and
+prevent rejoining until the next season.
+
+## Rules v4 rating
+
+Each character, job, and season has separate win/loss counters. Rating is the
+integer result of a symmetric Beta(20,20) prior:
+
+```text
+rating = 1500 + roundAwayFromZero(1000 * (wins - losses) / (matches + 40))
+```
+
+The formula is order-independent and updates in constant time. Kills, damage,
+healing, queue type, and party size never alter the number of points awarded.
+Examples: 1-0 = 1524, 6-4 = 1540, 9-1 = 1660, 10-0 = 1700,
+5-5 = 1500, and 0-10 = 1300.
+
+The idempotency key is `(season, normalized character identity, matchKey)`.
+An exact retry returns HTTP 200 with the current rating. Reusing that key with
+different validated data returns HTTP 409. D1 uniqueness is authoritative, and
+match insertion plus the rating counter update use one transactional batch.
+Matches completed before the active season began are rejected, and a D1 trigger
+atomically refuses writes if that season closes or changes during a request.
+
+Migration `0004_automatic_character_ranking.sql` intentionally removes all
+registration-era players, matches, and ratings, closes Season 1, and starts
+Season 2 with schema/rating-rules version 4. Old data is not carried forward.
+
+## Privacy and abuse controls
+
+- The installation secret and its SHA-256 digest are never persisted. The
+  digest exists only transiently while Cloudflare applies a rate limit.
+- Public data is limited to character name, Home World name, job, seasonal
+  rating, and aggregate record.
+- The database retains only the minimum match fields needed for idempotency,
+  limits, and counters. Validated scoreboard details are represented only in a
+  canonical payload digest and are not stored as raw statistics.
+- Connecting IP addresses are transiently hashed for Cloudflare rate-limit
+  keys and are not stored in D1 or application logs.
+- Invocation logs are disabled. Observability remains enabled only for sampled
+  traces and explicit operational failures. Structured
+  application errors contain only a random request ID, method, path, and error
+  class—never bodies, names, Worlds, match keys, IP addresses, or secrets.
+- No CORS headers are emitted. JSON is streamed and aborted above 16 KiB. All
+  SQL values are bound parameters, and timestamps/numeric fields are bounded.
+- Native rate limits allow 60 write attempts per connecting-address hash,
+  15 write attempts per transient installation hash, and 120 reads per minute.
+  D1 triggers additionally cap a character/job at 100 matches per UTC day and
+  5,000 per season.
+
+## Trust boundary
+
+The API prevents malformed, duplicated, out-of-season, and obviously abusive
+submissions, but an open-source game client cannot provide tamper-proof
+attestation. A modified client can still invent character names or results.
+The community board is therefore an honor-system statistic and needs moderation
+if it is exposed beyond a small trusted plugin community. Numeric World IDs and
+their public labels are server-validated; character existence is not.
+
+## Deploy and verify
+
+Prerequisites: Node.js 22+, pnpm 11, and Cloudflare Workers/D1.
 
 ```text
 pnpm install
@@ -25,44 +147,24 @@ pnpm exec wrangler login --use-keyring
 pnpm exec wrangler d1 create crystal-job-rank --jurisdiction eu
 ```
 
-The EU jurisdiction must be selected when the database is created and cannot be added later. `wrangler.jsonc` contains the UUID of the official production D1 database, not a placeholder. For a fork or another Cloudflare account, replace that value with the UUID returned by your own `d1 create` command, then run:
+The official D1 UUID is already in `wrangler.jsonc`. A fork must replace it
+with its own database UUID. Then run:
 
 ```text
+pnpm check
+pnpm test
+pnpm exec wrangler deploy --dry-run
 pnpm db:migrate:remote
 pnpm deploy
 ```
 
-`pnpm db:migrate:local` and `pnpm dev` provide a local database and development Worker. `pnpm test` runs the Rules-v3 golden tests and the Worker/D1 integration test; `pnpm check` type-checks the project.
+For local work, use `pnpm db:migrate:local` and `pnpm dev`. The three rate-limit
+namespace IDs in `wrangler.jsonc` must remain distinct within a Cloudflare
+account. Do not deploy before the migration and Worker version are ready to go
+live together.
 
-The four `namespace_id` values in `wrangler.jsonc` are deliberately separate. If those numbers are already used by another rate-limit binding in the same Cloudflare account, replace them with other positive integers before deployment.
+## Starting another season
 
-## HTTP contract
-
-- `GET /health`
-- `POST /v1/players/register` with `{ "characterName": "...", "worldId": 21, "worldName": "Ravana" }`
-- `POST /v1/matches` with `X-Api-Key`
-- `GET /v1/leaderboard?job=DRK&limit=50`
-- `DELETE /v1/players/me` with `X-Api-Key`
-
-JSON field names and numeric enum values match the existing .NET plugin client. Registration uses the character's official in-game name and Home World; identity uniqueness is the normalized `characterName` plus `worldId`. Public leaderboard rows expose `characterName` and `worldName`. Only Casual (`1`) and Ranked (`2`) matches are rated. The server starts each job at 1500 and applies Rules v3 using the canonical `completedAtUtc`, then fingerprint ordering. Scoreboard performance never changes rating.
-
-Schema migration 0003 intentionally invalidates legacy alias-only accounts and their dependent matches/ratings because no trustworthy Home World can be inferred. Registration counters are retained. Users register again with their official character identity after the migration.
-
-An identical retry is idempotent and returns the current rating with HTTP 200. Reusing a fingerprint for different data returns HTTP 409. The D1 unique constraint is the final duplicate authority. Match insertion and rating materialization run in one transactional batch: a chronologically newest match advances the cached rating in constant time, while a genuinely late match deterministically replays that player's job stream. Late matches are accepted only while that season/player/job history has fewer than 128 existing matches. At 128 and above, new chronologically latest matches and exact retries remain accepted, but another late match returns HTTP 409. A D1 trigger is authoritative even if concurrent requests pass the application preflight together.
-
-## Privacy and abuse controls
-
-- API keys contain 256 random bits and are returned only once. D1 stores only their SHA-256 hashes.
-- The database stores the official character name, Home World ID/name, and the minimum match fields required to verify idempotency and calculate rating. Scoreboard, territory, and duration values are validated but not retained as raw fields. A SHA-256 digest of the complete validated submission is retained so an exact retry can be distinguished from conflicting data.
-- Account deletion relies on foreign-key cascades and removes the player's matches and ratings.
-- Worker observability is disabled by default. Application errors log only a random request ID—never request bodies, character names, Home World metadata, fingerprints, IP addresses, or API keys.
-- Native free Workers rate-limit bindings allow 5 registrations, 60 authentication attempts, 15 combined authenticated writes per account, and 120 leaderboard/health reads per minute and key. Authentication is IP-limited before an API-key lookup or request-body read; authenticated writes are then keyed by API-key hash. Anonymous limits use a transient SHA-256 hash of the connecting address; the address is not stored in D1. Successful health responses are cached for 15 seconds under a query-free canonical key; failures are never cached.
-- No CORS headers are emitted. The Dalamud client does not need CORS, while browser cross-origin JSON requests and the custom API-key header therefore fail preflight.
-- JSON bodies are streamed and aborted as soon as they exceed 16 KiB. All SQL uses bound parameters, timestamps have a 90-day past/10-minute future window, and every numeric field has a strict range.
-- D1 triggers cap accepted matches at 100 per UTC day and 5,000 per season for each player/job pair. The daily ceiling returns HTTP 429 with a UTC-day retry delay; the permanent season ceiling returns HTTP 409 so an ordered client outbox can discard that match instead of blocking until a new season. A separate D1 trigger caps the whole deployment at 100 account registrations per UTC day. Its aggregate counter is intentionally retained when an account is deleted, so repeated create/delete cycles cannot reopen capacity. One hundred CC matches already represents roughly eight or more hours of play; the ceilings remain generous while bounding abuse.
-
-Cloudflare's native rate limiter is intentionally permissive and locally consistent. Security does not depend on it: D1 uniqueness, authentication, validation, and transaction boundaries remain authoritative.
-
-## Starting a new season
-
-Create the new season row and update `app_settings.current_season` in one migration. Existing matches remain historical and do not enter the new leaderboard. Never reuse a season ID. Rating rules changes should also update `rating_rules_version` and receive their own reviewed migration.
+Create a new season row and update `app_settings.current_season` in one reviewed
+migration. Never reuse a season ID. A rating-formula change must also increment
+`rating_rules_version`; a schema change must increment `schema_version`.

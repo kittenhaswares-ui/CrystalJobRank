@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CrystalJobRank.Core;
+using CrystalJobRank.Plugin.Models;
 using Dalamud.Plugin.Services;
 
 namespace CrystalJobRank.Plugin.Services;
@@ -54,7 +55,7 @@ internal sealed class LeaderboardOutbox : IDisposable
         worker = Task.Run(RunAsync);
     }
 
-    public void UpdateState(string serverBaseUrl, Guid? playerId, string apiKey, bool sharingEnabled)
+    public void UpdateState(string serverBaseUrl, string installationKey)
     {
         CancellationTokenSource? attemptToCancel;
         bool shouldWake;
@@ -64,14 +65,12 @@ internal sealed class LeaderboardOutbox : IDisposable
 
             var next = new UploadState(
                 LeaderboardOutboxState.NormalizeServerUrl(serverBaseUrl),
-                playerId,
-                apiKey ?? string.Empty,
-                sharingEnabled);
+                installationKey ?? string.Empty);
             var identityOrCredentialChanged = !uploadState.SameIdentityAndCredential(next);
             uploadState = next;
             paused = false;
 
-            if (data.Bind(next.IsRegistered ? next.PlayerId : null, next.ServerBaseUrl)) TrySaveLocked();
+            if (data.Bind(next.ServerBaseUrl)) TrySaveLocked();
 
             attemptToCancel = identityOrCredentialChanged || !next.CanUpload ? activeAttempt : null;
             shouldWake = next.CanUpload && data.Pending.Count > 0;
@@ -83,19 +82,24 @@ internal sealed class LeaderboardOutbox : IDisposable
 
     public void Enqueue(Guid matchId)
     {
-        var submission = matchStore.FindSubmission(matchId);
+        LeaderboardMatchSubmission? submission;
+        try
+        {
+            submission = matchStore.FindSubmission(matchId);
+        }
+        catch (Exception exception)
+        {
+            log.Error(exception, "Match {MatchId} has no valid automatic leaderboard identity.", matchId);
+            NotifyStatus("Match saved locally, but its character identity could not be queued.", true);
+            return;
+        }
+
         if (submission is null || !RatingEngine.IsRatedQueue(submission.Queue)) return;
 
         LeaderboardEnqueueResult result;
         lock (gate)
         {
-            if (disposed || paused || !uploadState.CanUpload) return;
-            if (data.PlayerId != uploadState.PlayerId ||
-                !string.Equals(data.ServerBaseUrl, uploadState.ServerBaseUrl, StringComparison.OrdinalIgnoreCase))
-            {
-                return;
-            }
-
+            if (disposed) return;
             result = data.Enqueue(matchId, DateTime.UtcNow);
             if (result == LeaderboardEnqueueResult.Added) TrySaveLocked();
         }
@@ -256,7 +260,7 @@ internal sealed class LeaderboardOutbox : IDisposable
             {
                 await leaderboardClient.SubmitAsync(
                     currentUpload.ServerBaseUrl,
-                    currentUpload.ApiKey,
+                    currentUpload.InstallationKey,
                     submission,
                     attempt.Token).ConfigureAwait(false);
                 RemoveHead(pending.MatchId);
@@ -264,8 +268,8 @@ internal sealed class LeaderboardOutbox : IDisposable
             }
             catch (OperationCanceledException) when (attempt.IsCancellationRequested)
             {
-                // Sharing was disabled, the identity changed, deletion started, or the plugin is unloading.
-                // The persisted head remains untouched unless the identity change also cleared it.
+                // The endpoint/installation key changed, a pause drained in-flight work,
+                // or the plugin is unloading. The persisted head remains queued.
             }
             catch (Exception exception)
             {
@@ -404,7 +408,6 @@ internal sealed class LeaderboardOutbox : IDisposable
     private bool HeadStillBelongsTo(Guid matchId, UploadState attemptedUpload) =>
         data.Pending.Count > 0 &&
         data.Pending[0].MatchId == matchId &&
-        data.PlayerId == attemptedUpload.PlayerId &&
         string.Equals(data.ServerBaseUrl, attemptedUpload.ServerBaseUrl, StringComparison.OrdinalIgnoreCase);
 
     private LeaderboardOutboxState Load()
@@ -497,17 +500,15 @@ internal sealed class LeaderboardOutbox : IDisposable
 
     private readonly record struct UploadState(
         string ServerBaseUrl,
-        Guid? PlayerId,
-        string ApiKey,
-        bool SharingEnabled)
+        string InstallationKey)
     {
-        public static UploadState Empty { get; } = new(string.Empty, null, string.Empty, false);
-        public bool IsRegistered => PlayerId.HasValue && !string.IsNullOrWhiteSpace(ApiKey);
-        public bool CanUpload => SharingEnabled && IsRegistered;
+        public static UploadState Empty { get; } = new(string.Empty, string.Empty);
+        public bool CanUpload =>
+            !string.IsNullOrWhiteSpace(ServerBaseUrl) &&
+            InstallationKey.Length == 43;
 
         public bool SameIdentityAndCredential(UploadState other) =>
-            PlayerId == other.PlayerId &&
             string.Equals(ServerBaseUrl, other.ServerBaseUrl, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(ApiKey, other.ApiKey, StringComparison.Ordinal);
+            string.Equals(InstallationKey, other.InstallationKey, StringComparison.Ordinal);
     }
 }

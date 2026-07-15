@@ -1,186 +1,145 @@
 # Architecture and trust model
 
-## Why a shared leaderboard needs a backend
+## Why the leaderboard has a backend
 
-Local match history and per-job ratings need no server. A leaderboard shared by
-different PCs needs one common source of truth that can accept writes and serve
-the aggregate view. GitHub Pages and a static custom-plugin repository are
-read-only at runtime, so they cannot fill that role.
+Local history and ratings need no server. A leaderboard shared by different
+PCs needs one common service that accepts writes and serves an aggregate view.
+The custom-plugin repository on GitHub is static and cannot do this itself.
 
-"Serverless" products such as Cloudflare Workers/D1, Supabase, or Firebase can
-reduce operations work, but they are still a backend service in this design.
+The hosted reference implementation is a Cloudflare Worker backed by D1. The
+ASP.NET project is a small local/self-hosted development equivalent.
 
-## Data flow
+## Post-match data flow
 
-1. FFXIV produces its normal Crystalline Conflict result payload.
-2. The plugin copies that post-match payload after the match has ended.
-3. The full scoreboard is stored locally in `matches.json`.
-4. The rating engine replays Casual and Ranked wins/losses, independently for
-   each job and local rating epoch.
-5. If the user explicitly joins, the plugin registers the currently logged-in
-   character's full name and Home World from Dalamud.
-6. If sharing is enabled, the plugin submits only that character's own future
-   Casual and Ranked match fields to the configured HTTPS API.
-7. The server validates the event and recomputes rating itself.
+1. FFXIV creates the normal Crystalline Conflict result payload.
+2. The hook copies the payload and identifies its own scoreboard row by
+   content ID, with a name/Home-World fallback, before returning control to the
+   game.
+3. The copied result is handed back to the Dalamud framework thread and then
+   admitted to a serial persistence worker; neither the detour nor a frame
+   update performs file or network I/O.
+4. The plugin stores the complete result locally using an atomic temporary-
+   file replacement.
+5. Casual and Ranked matches update the local character/job rating. Custom and
+   Unknown matches remain local statistics only.
+6. An eligible match enters a bounded FIFO outbox automatically. Retries reuse
+   the same match key and use capped backoff.
+7. The Worker validates the request, derives the canonical character identity,
+   de-duplicates the event, and updates W/L counters plus rating atomically.
 
-The plugin never uploads other players' names, worlds, content IDs, account IDs,
-or scoreboard rows. Public per-job responses contain the registered character
-name and Home World plus rank, rating, matches, wins, losses, and win rate.
+No registration or editable public identity exists. Identity is captured from
+each result, so switching characters cannot send a result under a previously
+selected profile.
 
-Local aggregation also derives persistent per-job personal records and
-role-specific streak progress from the same ordered match history. These values
-are never part of the leaderboard submission contract.
+## Character and installation identity
 
-## Rating model
+The public seasonal rating key is:
 
-This is an Elo-like estimate against a fixed 1500 reference pool:
+`normalized character name + numeric Home World ID + job + season`
 
-`expected = 1 / (1 + 10 ^ ((1500 - rating) / 2000))`
+The readable Home World name is presentation data derived by the service from
+the numeric ID; a caller-provided label cannot rename a public World or create
+another identity. A name change or Home World transfer creates a new public
+identity because there is no safe account or content ID in the upload
+contract.
 
-`delta = round(K * (result - expected))`
+Each plugin installation creates a random 256-bit secret. Requests carry it in
+`X-Installation-Key`; the Worker hashes it transiently for request rate limits
+and stores neither the key nor its digest in D1. This is an invisible
+rate-control credential, not an account:
 
-- result is `1` for a win and `0` for a loss;
-- `K = 64` for the first 10 provisional matches;
-- `K = 32` afterwards;
-- rating is clamped to `0..3000`;
-- every job starts at 1500 and has independent history;
-- Casual and Ranked matches affect the same rating and can be uploaded after
-  the user opts in;
-- Custom and Unknown-queue matches remain available only as local statistics;
-- damage, K/D/A, healing, and crystal time never affect rating.
+- it is never displayed as a public player ID;
+- it is not derived from hardware or Square Enix data;
+- it can submit results for any character used on that installation; and
+- multiple installations can contribute to the same character/job identity.
 
-The fixed baseline is deliberate. FFXIV does not expose the community rating of
-all opponents, and collecting persistent identities for non-users would create
-an unacceptable privacy tradeoff. The number therefore estimates sustained win
-rate, not the hidden matchmaking strength of a specific lobby.
+There is intentionally no client-side community reset. Public results remain
+until the administrator starts a new season. Local `/cjr reset` commands affect
+only private local rating epochs.
 
-The wider logistic scale is calibrated to the visible 100-point divisions:
+## Rating rules v4
 
-| Tier | Rating | Estimated win probability vs reference |
-| --- | ---: | ---: |
-| Bronze | 1500 | 50.0% |
-| Silver | 1600 | 52.9% |
-| Gold | 1700 | 55.7% |
-| Platinum | 1800 | 58.6% |
-| Diamond | 1900 | 61.3% |
-| Crystal | 2000 | 64.0% |
+The model is a Bayesian-smoothed seasonal win rate with a Beta(20,20) prior:
 
-## Lifetime records and achievements
+`exact = 1500 + 1000 × (wins − losses) / (wins + losses + 40)`
 
-Every job stores a monotonic all-time rating peak with a 1500 floor plus local
-maxima for kills, damage dealt, damage taken, and HP restored. Rating peaks only
-use Casual/Ranked rating events; personal scoreboard maxima may use any locally
-recorded CC queue. Implausible scoreboard values are rejected for new records
-and ignored during history backfill.
+The displayed integer uses deterministic nearest rounding with midpoint ties
+away from the 1500 baseline. Implementations share test vectors so C#,
+TypeScript, and SQLite produce the same number.
 
-Achievements use chronologically ordered Casual/Ranked matches and are isolated
-by role. Tank, DPS, and Healer each track current and best Win Streak and
-Deathless Streak independently. A match played on another role is absent from
-that role's sequence. Custom and Unknown queues neither advance nor break one.
-Deathless milestones are `1/3/5/10/20`; win milestones are `3/5/10/20`.
+- Every character/job starts at 1500.
+- Casual and Ranked have identical weight.
+- An allowed normal Casual group/premade match counts exactly like solo Casual.
+- Custom and Unknown queues do not enter the rating.
+- Scoreboard performance never changes rating.
+- Results are order-independent and can be updated from W/L counters in O(1).
+- Rating is bounded by the formula's 500–2500 range.
+- Entries with 1–9 matches are visible as provisional with `rank = 0`.
+- Established entries are numbered from 10 matches onward.
 
-## Local rating resets
+This is not Elo, Glicko, Square Enix rank, or opponent-adjusted MMR. The client
+does not know a trustworthy strength value for the lobby, so inventing one
+would add false precision.
 
-The plugin stores an integer rating epoch for every played job. Resetting a job
-increments only that job's epoch, so subsequent Casual and Ranked results replay
-from 1500 while old matches and scoreboards remain visible. Epochs avoid clock
-and late-arrival problems that a timestamp cutoff would introduce.
+## Local history, records, and achievements
 
-Local resets never remove community leaderboard results. Allowing users to
-delete only their losing public history would make the shared ladder
-meaningless; public resets should happen only through an administrator-defined
-season transition.
+The local JSON history contains result time, arena metadata, the ten scoreboard
+rows, progress, queue, character identity, rating fields, and the local
+player's statistics. It never leaves the PC as a full document.
 
-Schema version 3 is the one deliberate exception: upgrading from an older
-plugin version increments every local job epoch exactly once, preserving all
-matches and lifetime progress. Fresh installations start directly at schema 3,
-so the migration cannot run twice. The optional server performs the matching
-one-time transition to season 1; old submissions remain stored as season 0 and
-are excluded from the current leaderboard.
+Personal maxima cover kills, damage dealt, damage taken, and HP restored.
+Role achievements track Win Streak and Flawless sequences for Tank, DPS, and
+Healer. The v4 migration starts a clean rating generation once while retaining
+local history, non-rating records, and unlocked badge milestones.
 
-## Job icon rendering
+Rating epochs make local resets deterministic without deleting history. The
+current UI selects the latest captured character and replays only matches for
+that character; different characters never share W/L totals.
 
-The UI requests official job textures from the local game through Dalamud's
-`ITextureProvider` and the conventional `62000 + ClassJob row ID` icon lookup.
-No Square Enix texture is bundled. The icon is tinted with the current rank
-metal and surrounded by code-rendered job motifs and increasingly elaborate
-rank frames. Missing or not-yet-loaded textures fall back to the job
-abbreviation for that frame.
+## Worker storage and consistency
 
-## Authentication and abuse
+D1 stores only the current season's minimum shared state:
 
-Registration sends `characterName`, `worldId`, and `worldName` for the character
-currently logged in through Dalamud, then creates a random 256-bit API key. The
-server stores only the key's SHA-256 hash and returns the key once. Character
-name plus Home World ID form the unique public identity; leaderboard responses
-return the character and readable Home World as separate fields. Match deltas
-sent by clients are ignored; the server replays outcomes and de-duplicates
-fingerprints per account.
+- characters: canonical public character identity and the Home World name
+  derived server-side from its numeric World ID;
+- matches: season, identity, deterministic match key, payload hash, time, job,
+  outcome, and queue; and
+- ratings: materialized wins, losses, matches, and formula result.
 
-This is not cheat-proof. The plugin and protocol are open source, so a modified
-client can fabricate wins. No client-side secret or signature can solve that.
-Meaningful hardening would require at least one of:
+Territory, duration, and personal scoreboard values are accepted only for
+validation and payload conflict detection; raw values are not stored.
 
-- corroboration from multiple independent users in the same match;
-- a trusted match-attestation source;
-- moderation plus anomaly detection and account-age/minimum-match rules.
+One D1 batch inserts the deduplicated match and upserts its counter-based rating
+state. The `(season, identity, match key)` primary key makes retries idempotent.
+Database constraints enforce counter consistency, supported job/queue values,
+rating formula consistency, the active open-season boundary, and
+per-character/job volume caps. An offline result completed before the current
+season began is rejected instead of being assigned to the new season.
 
-Until then, the UI and documentation call this a community leaderboard, never
-an official rank or MMR.
+Migration `0004` intentionally ends community season 1, removes registration-
+era players/results, creates the automatic character schema, starts season 2,
+and switches to rating rules 4. It is applied once before the matching Worker
+code is deployed.
 
-## Backend deployment
+## Privacy and abuse limits
 
-The reference community API is `src/CrystalJobRank.Worker`. It runs on a
-Cloudflare Worker and materializes ratings in D1. Match insertion,
-de-duplication, and a deterministic replay of the affected player/job stream
-share one D1 transactional batch, so parallel and out-of-order uploads cannot
-leave a match without its corresponding rating state.
+The plugin never uploads another player's name, world, content ID, account ID,
+or scoreboard row. The Worker must not log request bodies, headers, character
+names, match keys, or network addresses. Character name and Home World are
+public by design; all other shared fields are used to compute or validate the
+community row.
 
-The hosted reference deployment uses
-`https://crystal-job-rank-api.kittenhaswares.workers.dev` as its API base URL.
-The first update to version 0.5 clears older leaderboard credentials and their
-pending upload queue once, then requires the player to join again with the
-current FFXIV character and Home World. This migration preserves local ratings,
-match history, records, and achievements.
-
-The production D1 database is created with the EU jurisdiction setting. The
-Worker stores the registered character name, Home World ID and name,
-authentication hash, rating state, and the minimum match fields needed for
-ordering and de-duplication. Territory, duration, and raw personal scoreboard
-values are validated in transit but discarded; a SHA-256 digest of the complete
-validated submission is retained to distinguish an exact retry from conflicting
-data.
-
-The plugin persists failed uploads as a bounded, identity-bound FIFO of local
-match IDs. It sends strictly from the head, uses capped exponential backoff,
-and reconstructs each submission from local history, so the retry file contains
-neither API keys nor duplicated scoreboard data. The Worker caps late-event
-replay depth, aggregate daily registrations, and per-job match volume with D1
-triggers; edge rate limits are not the authoritative protection.
-
-`src/CrystalJobRank.Server` remains a dependency-free ASP.NET development and
-self-hosting alternative. Its JSON store is safe for one process and a small
-MVP, but it is not the storage used by the hosted reference leaderboard and
-must not be scaled to multiple replicas.
-
-Public deployment requirements:
-
-- expose only the final HTTPS Worker hostname to plugins and never follow
-  authentication redirects;
-- keep Worker observability free of request bodies, character names,
-  fingerprints, addresses, and API keys;
-- apply reviewed D1 migrations before deploying matching Worker code;
-- retain database uniqueness constraints even when edge rate limits are used;
-- publish retention and deletion behavior, including D1 Time Travel recovery
-  versions; and
-- do not log `X-Api-Key` headers or request bodies.
-
-The plugin accepts plain HTTP only for loopback development URLs.
-The complete reference-service disclosure is in `PRIVACY.md`.
+The protocol is not cheat-proof. An open-source client can fabricate a result,
+and a client-held secret cannot attest that a game occurred. Stronger integrity
+would require an official match source, independent multi-client corroboration,
+or moderation/anomaly detection. Until then, the UI calls it a community
+leaderboard and never an official rank.
 
 ## Patch resilience
 
-The result hook and memory offsets are version-sensitive. They compile against
-Dalamud API 15 and were cross-checked for Patch 7.5, but must be tested in game
-after every FFXIV patch. Invalid result values, durations, jobs, and scoreboard
-ranges are rejected instead of being persisted.
+The result hook, native signature, and packet offsets are version-sensitive.
+They must be checked after each FFXIV patch. Queue classification uses the
+current Content Finder condition IDs: normal solo and allowed two-player Casual
+registration share the Casual path, while known custom duties remain excluded.
+Invalid names, worlds, jobs, results, durations, and scoreboard ranges are
+rejected instead of being persisted or uploaded.

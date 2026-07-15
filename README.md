@@ -1,174 +1,139 @@
 # Crystal Job Rank
 
+Crystal Job Rank is an experimental Dalamud plugin for post-match
+**Crystalline Conflict** statistics. It records result screens, keeps local
+match history and records, and calculates a separate seasonal rating for every
+character and job.
+
 Repository: https://github.com/kittenhaswares-ui/CrystalJobRank
 
-Crystal Job Rank is an experimental Dalamud plugin for **post-match**
-Crystalline Conflict statistics. It records the result screen, keeps a local
-match history, and calculates a separate community-style rating for every job
-you play.
+## Version 0.6
 
-Version 0.5 uses the identity already shown in FFXIV instead of an editable
-public name. Joining the community leaderboard is optional and off by default.
-When you join, the plugin reads the currently logged-in character's full name
-and Home World through Dalamud; public entries are shown as
-`Character Name · Home World`. Updating once clears leaderboard credentials
-and queued uploads created by older versions, so you must join again. Local
-ratings, match history, records, and achievements are preserved.
+The community leaderboard is automatic. There is no registration form,
+editable alias, sharing checkbox, account-wide rating, or character lock.
+After an eligible result screen appears, the plugin reads the local player's
+character name, numeric Home World ID, job, and result from that result and
+queues it for the shared leaderboard. The service derives the public Home
+World name from the numeric ID instead of trusting an editable label.
 
-Every combat job has its own clearly separated community standings screen.
-Jobs are grouped as Tank, Healer, Melee, Physical Ranged, and Caster. Choosing
-a job immediately loads its current top 50 with rank tier, rating, match
-record, win rate, and refresh time. A response is never displayed under a
-different job or server.
+The public rating key is:
 
-Version 0.4.1 connected the optional community leaderboard to the live hosted
-API at `https://crystal-job-rank-api.kittenhaswares.workers.dev`. Fresh
-installs use that address automatically. Existing installations that still
-contain the old placeholder address migrate once; custom server addresses,
-leaderboard credentials, and sharing choices were preserved by that release.
-Registration and future match sharing remain separate choices. Temporary
-upload failures stay in a bounded local FIFO queue and retry automatically
-without writing API keys or scoreboard rows to that queue.
+`character name + numeric Home World ID + job + community season`
 
-Version 0.4 adds official in-game job icons with rank-metal colors and
-job-specific ornaments, persistent personal records, and role achievements.
-The update starts every local job at a fresh 1500 rating exactly once. Match
-history, all-time peaks, personal scoreboard records, and badges are retained.
+This means:
 
-The rating is not Square Enix's hidden matchmaking rating and it is not an
-official competitive ladder. It is a transparent, outcome-only estimate:
+- every character is independent, even on the same installation;
+- every job for that character is independent;
+- the same character merges into one profile when played from another PC;
+- changing character switches profiles automatically after that character's
+  first captured result;
+- no freely editable alias can appear on the board; and
+- public rows are shown as `Character Name · Home World`.
 
-- every job starts at 1500;
-- Casual and Ranked wins add rating, while Casual and Ranked losses remove it;
-- Custom and Unknown-queue matches are recorded but never rated or uploaded;
-- the first 10 matches use a larger provisional adjustment (`K = 64`),
-  followed by a steadier established adjustment (`K = 32`);
-- damage, kills, and healing are displayed but never influence rating.
+The board combines players across regions. Region and data center are not
+uploaded or used as filters.
 
-Each job card also keeps its all-time highest rating and highest local kills,
-damage dealt, damage taken, and healing. Scoreboard records include every
-locally recorded CC match; only Casual and Ranked affect rating and streaks.
+Version 0.6 deliberately starts a fresh local rating generation and a fresh
+community season once. Old registration credentials and pending uploads are
+discarded. Match history, scoreboard records, and unlocked achievement badges
+remain local and are preserved.
 
-The header displays two achievement families for Tank, DPS, and Healer. Job
-changes within the same role continue that role's sequence, while playing a
-different role neither advances nor breaks it:
+## Rating model
 
-- **Flawless** — finish 1, 3, 5, 10, or 20 eligible matches in a row without dying;
+FFXIV does not expose a usable opponent MMR for this plugin, and normal
+matchmaking is not treated as an MMR ladder. The rating therefore uses only a
+job's seasonal wins and losses:
+
+`rating = 1500 + 1000 × (wins − losses) / (wins + losses + 40)`
+
+The `+40` is a symmetric 20-win/20-loss prior. It keeps a tiny sample from
+jumping straight to an extreme while allowing a sustained record to move the
+rating naturally. The displayed value is rounded deterministically; damage,
+kills, deaths, healing, assists, and crystal time never affect it.
+
+Examples:
+
+| Record | Rating |
+| --- | ---: |
+| 0–0 | 1500 |
+| 1–0 | 1524 |
+| 6–4 | 1540 |
+| 9–1 | 1660 |
+| 10–0 | 1700 |
+| 5–5 | 1500 |
+| 0–10 | 1300 |
+
+Rules:
+
+- Casual and Ranked wins and losses count equally.
+- A normal Casual match counts equally whether queued solo or as an allowed
+  two-player group/premade; there is no group penalty.
+- Custom and unknown-queue matches remain local and never affect or enter the
+  community rating.
+- The first result immediately creates a visible provisional entry.
+- An entry receives a numbered leaderboard position after 10 matches.
+- Results are order-independent, so delayed retries cannot change the final
+  value.
+
+The visual tiers are Bronze below 1600, Silver at 1600, Gold at 1700,
+Platinum at 1800, Diamond at 1900, and Crystal at 2000. These are Crystal Job
+Rank's presentation tiers, not Square Enix's official CC rank or hidden MMR.
+
+## Local records and achievements
+
+The job cards use official in-game job icons loaded from the local FFXIV
+installation. Rank-metal colors, frames, and job-specific ornaments become
+richer at higher tiers. The plugin does not redistribute Square Enix textures.
+
+Each job also tracks personal best kills, damage dealt, damage taken, healing,
+and its rating peak for the current rating rules. The header keeps role badges
+for Tank, DPS, and Healer:
+
+- **Flawless** — finish 1, 3, 5, 10, or 20 eligible matches in a row without
+  dying;
 - **Win Streak** — win 3, 5, 10, or 20 eligible matches in a row.
 
-Custom and Unknown-queue matches do not count and do not interrupt a streak.
-The highest badge remains unlocked after the active streak ends.
-
-The rating screen uses job-colored progress bars and six visual tiers. The
-initial 1500 rating starts at Bronze, followed by Silver at 1600, Gold at
-1700, Platinum at 1800, Diamond at 1900, and Crystal at 2000. Ratings below
-1500 remain Bronze. The colors follow the familiar
-community/FFLogs job palette; Square Enix does not publish an official set of
-job-color hex values.
-
-The center of every rank badge is the official job icon loaded at runtime from
-the player's FFXIV installation. The plugin does not redistribute those game
-textures. Bronze through Crystal tint the icon and add progressively richer
-frames; job motifs include Dark Knight lightning, Bard music notes, Dancer
-feathers, and equivalent ornaments for every supported job.
+Job changes inside the same role continue that role's sequence. Custom and
+unknown matches neither advance nor break it. The highest unlocked badge stays
+unlocked after an active streak ends.
 
 ![Job rank upgrade art-direction board](assets/concepts/job-rank-upgrades.png)
 
-The concept board was generated with OpenAI image generation for art direction.
-The shipping UI deliberately uses Square Enix's real in-game icons rather than
-AI-redrawn substitutes.
+The concept board was generated for art direction. The shipping UI uses the
+real job icon from the game and code-rendered ornaments.
 
-The rating is a fixed-reference logistic estimate because FFXIV does not expose
-opponent MMR. At equilibrium, the visible thresholds correspond to roughly
-50.0%, 52.9%, 55.7%, 58.6%, 61.3%, and 64.0% estimated win probability against
-the reference pool. This keeps the ladder attainable without pretending to
-know the strength of a particular lobby.
+## Community service and privacy
 
-This repository also contains the opt-in community leaderboard API. A shared
-leaderboard cannot work from a static GitHub repository alone: it needs a
-common service that receives submissions. The reference service runs on a
-Cloudflare Worker with an EU-jurisdiction D1 database. Joining automatically
-uses the current character's full name and Home World. Only the joining
-player's future Casual and Ranked results can be shared; existing history and
-other players' scoreboard data stay local. Raw arena, duration, and personal
-scoreboard values are validated but not retained by the hosted database. Its
-production API base URL is
-`https://crystal-job-rank-api.kittenhaswares.workers.dev`, with a public
-[health check](https://crystal-job-rank-api.kittenhaswares.workers.dev/health).
-Public per-job rows contain character name, Home World, rank, rating, matches,
-wins, losses, and win rate. Sharing can be stopped at any time, and the online
-identity and its submitted data can be deleted from the plugin. See the short
-[`PRIVACY.md`](PRIVACY.md) notice for details. D1 constraints cap costly
-late-result replays, daily registrations, and per-job submission volume so the
-free shared service has authoritative abuse bounds beyond its edge rate limits.
+A cross-PC leaderboard needs a shared backend; a static GitHub repository
+alone cannot receive match results. The reference service runs on Cloudflare
+Workers with a D1 database:
 
-## Status
+`https://crystal-job-rank-api.kittenhaswares.workers.dev`
 
-Early MVP. The domain model and server can be tested without FFXIV. The Dalamud
-capture hook must be verified in game after every FFXIV patch because its
-signature and packet layout can change.
+Only the local player's eligible future results are sent. Other players'
+names, IDs, worlds, and scoreboard rows are never submitted. The random local
+installation secret is used only for transient request rate limiting and is
+not stored or linked to a character by the service. Public rows show character
+name, Home World, job rating, matches, wins, losses, and win rate. The short
+disclosure is in [`PRIVACY.md`](PRIVACY.md).
 
-## Repository layout
+The service is community-reported, not cheat-proof. A modified client can
+fabricate results because Square Enix provides no match-attestation API. It
+must never be presented as an official competitive ranking.
 
-- `src/CrystalJobRank.Core` — deterministic rating engine and shared contracts.
-- `src/CrystalJobRank.Plugin` — Dalamud API 15 plugin.
-- `src/CrystalJobRank.Worker` — hosted Cloudflare Worker/D1 leaderboard API.
-- `src/CrystalJobRank.Server` — local/self-hosted ASP.NET development API.
-- `tests/CrystalJobRank.Core.SelfTest` — dependency-free rating and persistence checks.
-- `docs/ARCHITECTURE.md` — privacy, trust, and deployment decisions.
+## Install
 
-## Build
-
-Requirements: .NET 10 SDK. Building the plugin also restores
-`Dalamud.NET.Sdk/15.0.0`.
-
-```powershell
-dotnet build CrystalJobRank.slnx -c Release
-dotnet run --project tests/CrystalJobRank.Core.SelfTest -c Release
-```
-
-Run the development server:
-
-```powershell
-dotnet run --project src/CrystalJobRank.Server
-```
-
-The API listens on the URL printed by ASP.NET Core. Configure that HTTPS URL in
-the plugin before opting in to leaderboard sharing.
-
-The production Worker uses pnpm 11 and Cloudflare's local workerd/D1 runtime:
-
-```powershell
-cd src/CrystalJobRank.Worker
-pnpm install
-pnpm check
-pnpm test
-pnpm db:migrate:local
-```
-
-Deployment and EU-database creation are documented in
-[`src/CrystalJobRank.Worker/README.md`](src/CrystalJobRank.Worker/README.md).
-
-## Dalamud development install
-
-Build `src/CrystalJobRank.Plugin`, add the resulting
-`CrystalJobRank.Plugin.dll` as a development plugin in Dalamud, then use
-`/cjr`. The plugin records only the post-match results payload; it does not
-render live combat information or automate gameplay.
-
-## Install from the custom repository
-
-Add this URL under Dalamud Settings > Experimental > Custom Plugin
-Repositories:
+Add this URL under **Dalamud Settings → Experimental → Custom Plugin
+Repositories**:
 
 ```text
 https://raw.githubusercontent.com/kittenhaswares-ui/CrystalJobRank/main/repo.json
 ```
 
-Save the settings, open `/xlplugins`, search for **Crystal Job Rank**, and
-install it. Use `/cjr` to open the plugin window and its leaderboard settings.
+Save, open `/xlplugins`, search for **Crystal Job Rank**, and install it. Use
+`/cjr` to open the window.
 
-Local rating commands:
+Local rating reset commands remain available for testing and private views:
 
 ```text
 /cjr reset SGE
@@ -176,27 +141,47 @@ Local rating commands:
 /cjr reset all
 ```
 
-Job abbreviations are case-insensitive and use the official three-letter job
-codes. A reset starts a new local rating epoch at 1500 Bronze while preserving
-the complete match history. It intentionally does not erase the shared
-community leaderboard, where freely deleting losses would undermine the
-ladder.
+Job abbreviations are case-insensitive official three-letter codes. A local
+reset does not erase or reset the community-season rating.
 
-The 0.4 update also performs one automatic season reset for every job. This is
-schema-migration based and therefore cannot repeat on later launches. A hosted
-copy of the included leaderboard server likewise moves existing submissions to
-historical season 0 and starts season 1 once when upgraded.
+## Build and test
+
+Requirements: .NET 10 SDK. Building the plugin restores
+`Dalamud.NET.Sdk/15.0.0`. The Worker uses pnpm 11.
+
+```powershell
+dotnet build CrystalJobRank.slnx -c Release
+dotnet run --project tests/CrystalJobRank.Core.SelfTest -c Release
+
+cd src/CrystalJobRank.Worker
+pnpm install
+pnpm check
+pnpm test
+pnpm exec wrangler deploy --dry-run
+```
+
+Repository layout:
+
+- `src/CrystalJobRank.Core` — deterministic rating engine and shared models;
+- `src/CrystalJobRank.Plugin` — Dalamud API 15 capture and UI;
+- `src/CrystalJobRank.Worker` — hosted Cloudflare Worker/D1 API;
+- `src/CrystalJobRank.Server` — local ASP.NET development API;
+- `tests/CrystalJobRank.Core.SelfTest` — dependency-free behavior checks;
+- `docs/ARCHITECTURE.md` — data flow, trust model, and deployment notes.
+
+The result hook and memory layout are patch-sensitive and must be verified in
+game after FFXIV updates. The plugin only reads the post-match result payload;
+it does not render live combat assistance or automate gameplay.
 
 ## Distribution caveat
 
-Dalamud's official repository currently rejects PvP plugins that could create a
-competitive advantage. This project intentionally avoids live assistance, but
-official acceptance is still unlikely and must be discussed with the Plugin
-Approval Committee before submission. A custom repository is the realistic
-distribution path.
+Dalamud's official repository has historically restricted PvP plugins that
+could create a competitive advantage. Crystal Job Rank intentionally operates
+only after a match, but a custom repository remains the realistic distribution
+path.
 
 ## License and attribution
 
-Crystal Job Rank is released under the MIT License. Research for the current
-post-match result layout was cross-checked against the MIT-licensed PvP Tracker
-project. See `THIRD_PARTY_NOTICES.md`.
+Crystal Job Rank is MIT licensed. Post-match interoperability research was
+cross-checked against the MIT-licensed PvP Tracker project. See
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
